@@ -1,0 +1,60 @@
+[project]
+name = "perception-mcp-server"
+version = "0.1.0"
+description = "Perception MCP Server for robotic object detection, 3D localization, and grasp planning using vision LLMs (Claude or Qwen3-VL)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+    { name = "Your Name" }
+]
+
+dependencies = [
+    "fastmcp>=2.11.3",
+    "mcp[cli]>=1.13.0",
+    "anthropic>=0.49.0",
+    "openai>=1.0.0",
+    "opencv-python>=4.11.0.86",
+    "pillow>=11.3.0",
+    "numpy>=1.24.0",
+    "websocket-client>=1.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+    "pytest-timeout",
+]
+
+[project.scripts]
+perception-mcp-server = "perception_mcp.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+packages = [
+    "perception_mcp",
+    "perception_mcp.tools",
+    "perception_mcp.utils",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --tb=short"
