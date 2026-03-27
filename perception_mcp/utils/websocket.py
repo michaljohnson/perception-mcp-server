@@ -158,6 +158,88 @@ class WebSocketManager:
             "height": msg.get("height", 480),
         }
 
+    def get_pointcloud(
+        self, topic: str, timeout: float = None
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        """Subscribe to a PointCloud2 topic and return points and colors.
+
+        Parses the rosbridge PointCloud2 message to extract XYZ coordinates
+        and RGB colors. Handles the 24-byte point_step format used by the
+        segmentation node (x, y, z at offsets 0/4/8, rgb at offset 16).
+
+        Args:
+            topic: PointCloud2 topic
+            timeout: Timeout in seconds
+
+        Returns:
+            Tuple of (points, colors, frame_id) where:
+                - points: np.ndarray (N, 3) float32 XYZ coordinates
+                - colors: np.ndarray (N, 3) float32 RGB in [0, 1]
+                - frame_id: str camera frame ID
+        """
+        msg = self.subscribe_once(
+            topic, msg_type="sensor_msgs/msg/PointCloud2", timeout=timeout
+        )
+
+        width = msg.get("width", 0)
+        height = msg.get("height", 1)
+        point_step = msg.get("point_step", 24)
+        frame_id = msg.get("header", {}).get("frame_id", "")
+        data = base64.b64decode(msg.get("data", ""))
+
+        num_points = width * height
+        if num_points == 0 or len(data) == 0:
+            return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32), frame_id
+
+        # Build field offset lookup from the message
+        field_offsets = {}
+        for field in msg.get("fields", []):
+            field_offsets[field["name"]] = field["offset"]
+
+        x_off = field_offsets.get("x", 0)
+        y_off = field_offsets.get("y", 4)
+        z_off = field_offsets.get("z", 8)
+        rgb_off = field_offsets.get("rgb", 16)
+        has_rgb = "rgb" in field_offsets
+
+        points = np.empty((num_points, 3), dtype=np.float32)
+        colors = np.empty((num_points, 3), dtype=np.float32)
+
+        for i in range(num_points):
+            base = i * point_step
+            points[i, 0] = struct.unpack_from('<f', data, base + x_off)[0]
+            points[i, 1] = struct.unpack_from('<f', data, base + y_off)[0]
+            points[i, 2] = struct.unpack_from('<f', data, base + z_off)[0]
+
+            if has_rgb:
+                rgb_int = struct.unpack_from('<I', data, base + rgb_off)[0]
+                colors[i, 0] = ((rgb_int >> 16) & 0xFF) / 255.0  # R
+                colors[i, 1] = ((rgb_int >> 8) & 0xFF) / 255.0   # G
+                colors[i, 2] = (rgb_int & 0xFF) / 255.0           # B
+            else:
+                colors[i] = [0.0, 0.0, 0.0]
+
+        # Filter out invalid points (NaN, inf, zero)
+        valid = np.isfinite(points).all(axis=1) & (np.abs(points).sum(axis=1) > 0)
+        return points[valid], colors[valid], frame_id
+
+    def publish(self, topic: str, msg_type: str, msg: dict) -> None:
+        """Publish a message to a ROS topic via rosbridge.
+
+        Args:
+            topic: ROS topic to publish to
+            msg_type: ROS message type (e.g. 'moveit_msgs/msg/CollisionObject')
+            msg: Message data as dict
+        """
+        ws = self._ensure_connected()
+        pub_msg = {
+            "op": "publish",
+            "topic": topic,
+            "type": msg_type,
+            "msg": msg,
+        }
+        ws.send(json.dumps(pub_msg))
+
     def close(self):
         """Close the websocket connection."""
         with self._lock:

@@ -1,9 +1,14 @@
 """Grasp planning tools.
 
 Combines detection, depth projection, and LLM reasoning to
-generate grasp poses and check reachability.
+generate grasp poses and check reachability. Also provides
+pointcloud-based grasp target computation and planning scene
+collision object management.
 """
 
+import time
+
+import numpy as np
 from fastmcp import FastMCP
 
 from perception_mcp.utils.depth import bbox_to_3d, pixel_to_3d
@@ -203,4 +208,191 @@ def register_grasping_tools(
             "position_camera_frame": pos,
             "max_reach": max_reach,
             "suggestion": suggestion if suggestion else "Object is within reach.",
+        }
+
+    @mcp.tool(
+        description=(
+            "Compute a grasp target from the segmented point cloud.\n\n"
+            "Reads the /segmented_pointcloud topic (published by segment_objects)\n"
+            "and computes the centroid as the grasp target position. Also returns\n"
+            "the bounding box dimensions of the object.\n\n"
+            "PREREQUISITE: Call segment_objects() first to generate the point cloud.\n\n"
+            "Returns the grasp position in the camera frame. The caller must\n"
+            "transform this to the robot base frame for MoveIt.\n\n"
+            "Example usage:\n"
+            "- First: segment_objects(prompt='red cube')\n"
+            "- Then: get_grasp_from_pointcloud(object_name='red cube')\n"
+        ),
+    )
+    def get_grasp_from_pointcloud(
+        object_name: str,
+        pointcloud_topic: str = "/segmented_pointcloud",
+        timeout: float = 10.0,
+    ) -> dict:
+        """Compute grasp target from a segmented point cloud.
+
+        Args:
+            object_name: Name of the segmented object (for labeling).
+            pointcloud_topic: Topic to read the point cloud from.
+            timeout: Max seconds to wait for point cloud message.
+
+        Returns:
+            dict with:
+                - object_name: str
+                - centroid: {x, y, z} grasp target in camera frame (meters)
+                - bounding_box: {min: {x,y,z}, max: {x,y,z}, size: {x,y,z}}
+                - num_points: int
+                - frame_id: str
+        """
+        try:
+            points, colors, frame_id = ws_manager.get_pointcloud(
+                pointcloud_topic, timeout=timeout
+            )
+        except TimeoutError:
+            return {
+                "error": (
+                    f"Timeout ({timeout}s) waiting for point cloud on "
+                    f"{pointcloud_topic}. Did you call segment_objects() first?"
+                )
+            }
+        except Exception as e:
+            return {"error": f"Failed to read point cloud: {str(e)}"}
+
+        if len(points) == 0:
+            return {
+                "object_name": object_name,
+                "error": "Point cloud is empty — segmentation may have failed.",
+            }
+
+        # Compute centroid
+        centroid = points.mean(axis=0)
+
+        # Compute axis-aligned bounding box
+        pt_min = points.min(axis=0)
+        pt_max = points.max(axis=0)
+        size = pt_max - pt_min
+
+        return {
+            "object_name": object_name,
+            "centroid": {
+                "x": round(float(centroid[0]), 4),
+                "y": round(float(centroid[1]), 4),
+                "z": round(float(centroid[2]), 4),
+            },
+            "bounding_box": {
+                "min": {
+                    "x": round(float(pt_min[0]), 4),
+                    "y": round(float(pt_min[1]), 4),
+                    "z": round(float(pt_min[2]), 4),
+                },
+                "max": {
+                    "x": round(float(pt_max[0]), 4),
+                    "y": round(float(pt_max[1]), 4),
+                    "z": round(float(pt_max[2]), 4),
+                },
+                "size": {
+                    "x": round(float(size[0]), 4),
+                    "y": round(float(size[1]), 4),
+                    "z": round(float(size[2]), 4),
+                },
+            },
+            "num_points": len(points),
+            "frame_id": frame_id,
+        }
+
+    @mcp.tool(
+        description=(
+            "Add a collision object (box) to the MoveIt planning scene.\n\n"
+            "Publishes a CollisionObject to /planning_scene so MoveIt can\n"
+            "plan around the object. The box is placed at the given position\n"
+            "with the given dimensions.\n\n"
+            "Use the bounding_box output from get_grasp_from_pointcloud()\n"
+            "to get position and size values.\n\n"
+            "Example usage:\n"
+            "- add_collision_object('red_cube', 0.5, -0.1, 0.8, 0.05, 0.05, 0.05)\n"
+        ),
+    )
+    def add_collision_object(
+        object_name: str,
+        x: float,
+        y: float,
+        z: float,
+        size_x: float,
+        size_y: float,
+        size_z: float,
+        frame_id: str = "arm_camera_color_optical_frame",
+    ) -> dict:
+        """Add a box collision object to the MoveIt planning scene.
+
+        Args:
+            object_name: Unique ID for the collision object.
+            x: Box center X position in meters.
+            y: Box center Y position in meters.
+            z: Box center Z position in meters.
+            size_x: Box size along X in meters.
+            size_y: Box size along Y in meters.
+            size_z: Box size along Z in meters.
+            frame_id: TF frame the position is expressed in.
+
+        Returns:
+            dict with status of the operation.
+        """
+        # Build moveit_msgs/msg/CollisionObject
+        collision_object = {
+            "header": {
+                "stamp": {"sec": 0, "nanosec": 0},
+                "frame_id": frame_id,
+            },
+            "id": object_name,
+            "operation": 0,  # ADD
+            "primitives": [
+                {
+                    "type": 1,  # BOX
+                    "dimensions": [float(size_x), float(size_y), float(size_z)],
+                }
+            ],
+            "primitive_poses": [
+                {
+                    "position": {
+                        "x": float(x),
+                        "y": float(y),
+                        "z": float(z),
+                    },
+                    "orientation": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.0,
+                        "w": 1.0,
+                    },
+                }
+            ],
+        }
+
+        # Wrap in PlanningScene message
+        planning_scene_msg = {
+            "world": {
+                "collision_objects": [collision_object],
+            },
+            "is_diff": True,
+        }
+
+        try:
+            ws_manager.publish(
+                "/planning_scene",
+                "moveit_msgs/msg/PlanningScene",
+                planning_scene_msg,
+            )
+        except Exception as e:
+            return {"error": f"Failed to publish collision object: {str(e)}"}
+
+        return {
+            "status": "SUCCESS",
+            "object_name": object_name,
+            "frame_id": frame_id,
+            "position": {"x": x, "y": y, "z": z},
+            "size": {"x": size_x, "y": size_y, "z": size_z},
+            "description": (
+                f"Collision object '{object_name}' added to planning scene "
+                f"at ({x:.3f}, {y:.3f}, {z:.3f}) in frame '{frame_id}'."
+            ),
         }

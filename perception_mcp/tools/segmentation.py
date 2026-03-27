@@ -63,14 +63,25 @@ def register_segmentation_tools(
         except Exception as e:
             return {"error": f"Failed to publish prompt: {str(e)}"}
 
-        # Wait for status response on /segmentation_status
+        # Wait for a terminal status (skip intermediate SEGMENTING messages).
+        # The status topic uses latched/transient-local QoS, so the first
+        # message we receive may be the stale SEGMENTING from when the node
+        # started processing.  Poll until we get a final result.
+        import time as _time
+
         try:
-            status_msg = ws_manager.subscribe_once(
-                "/segmentation_status",
-                msg_type="std_msgs/msg/String",
-                timeout=timeout,
-            )
-            status = status_msg.get("data", "UNKNOWN")
+            deadline = _time.monotonic() + timeout
+            status = "SEGMENTING"
+            while status == "SEGMENTING":
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for segmentation result")
+                status_msg = ws_manager.subscribe_once(
+                    "/segmentation_status",
+                    msg_type="std_msgs/msg/String",
+                    timeout=remaining,
+                )
+                status = status_msg.get("data", "UNKNOWN")
         except TimeoutError:
             return {
                 "error": f"Timeout ({timeout}s) waiting for segmentation result. "

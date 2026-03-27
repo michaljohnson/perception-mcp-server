@@ -8,8 +8,13 @@ Supports two vision backends:
 import argparse
 import os
 import sys
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastmcp import FastMCP
+
+# Load .env from the server root directory
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 from perception_mcp.tools import register_all_tools
 from perception_mcp.utils.websocket import WebSocketManager
@@ -22,7 +27,7 @@ ROSBRIDGE_PORT = int(os.environ.get("ROSBRIDGE_PORT", "9090"))
 VISION_BACKEND = os.environ.get("VISION_BACKEND", "openai")  # "anthropic" or "openai"
 VISION_API_KEY = os.environ.get("VISION_API_KEY", os.environ.get("ANTHROPIC_API_KEY", "dummy"))
 VISION_MODEL = os.environ.get("VISION_MODEL", "")  # Empty = use default per backend
-VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://172.20.1.1:8000/v1")
+VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://127.0.0.1:8000/v1")
 
 # Camera topics per camera
 CAMERA_TOPICS = {

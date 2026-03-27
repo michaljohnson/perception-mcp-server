@@ -33,7 +33,7 @@ def create_vision_client(
         return OpenAIVisionClient(
             api_key=api_key,
             model=model or "QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ",
-            base_url=base_url or "http://172.20.1.1:8000/v1",
+            base_url=base_url or "http://127.0.0.1:8000/v1",
         )
     else:
         return AnthropicVisionClient(

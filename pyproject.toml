@@ -16,8 +16,9 @@ dependencies = [
     "openai>=1.0.0",
     "opencv-python>=4.11.0.86",
     "pillow>=11.3.0",
-    "numpy>=1.24.0",
+    "numpy>=1.24.0,<2",
     "websocket-client>=1.8.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
