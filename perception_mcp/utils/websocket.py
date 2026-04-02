@@ -158,29 +158,16 @@ class WebSocketManager:
             "height": msg.get("height", 480),
         }
 
-    def get_pointcloud(
-        self, topic: str, timeout: float = None
-    ) -> tuple[np.ndarray, np.ndarray, str]:
-        """Subscribe to a PointCloud2 topic and return points and colors.
-
-        Parses the rosbridge PointCloud2 message to extract XYZ coordinates
-        and RGB colors. Handles the 24-byte point_step format used by the
-        segmentation node (x, y, z at offsets 0/4/8, rgb at offset 16).
+    @staticmethod
+    def _parse_pointcloud(msg: dict) -> tuple[np.ndarray, np.ndarray, str]:
+        """Parse a rosbridge PointCloud2 message into numpy arrays.
 
         Args:
-            topic: PointCloud2 topic
-            timeout: Timeout in seconds
+            msg: The rosbridge PointCloud2 message dict.
 
         Returns:
-            Tuple of (points, colors, frame_id) where:
-                - points: np.ndarray (N, 3) float32 XYZ coordinates
-                - colors: np.ndarray (N, 3) float32 RGB in [0, 1]
-                - frame_id: str camera frame ID
+            Tuple of (points, colors, frame_id).
         """
-        msg = self.subscribe_once(
-            topic, msg_type="sensor_msgs/msg/PointCloud2", timeout=timeout
-        )
-
         width = msg.get("width", 0)
         height = msg.get("height", 1)
         point_step = msg.get("point_step", 24)
@@ -222,6 +209,113 @@ class WebSocketManager:
         # Filter out invalid points (NaN, inf, zero)
         valid = np.isfinite(points).all(axis=1) & (np.abs(points).sum(axis=1) > 0)
         return points[valid], colors[valid], frame_id
+
+    def get_pointcloud(
+        self, topic: str, timeout: float = None
+    ) -> tuple[np.ndarray, np.ndarray, str]:
+        """Subscribe to a PointCloud2 topic and return points and colors.
+
+        Args:
+            topic: PointCloud2 topic
+            timeout: Timeout in seconds
+
+        Returns:
+            Tuple of (points, colors, frame_id).
+        """
+        msg = self.subscribe_once(
+            topic, msg_type="sensor_msgs/msg/PointCloud2", timeout=timeout
+        )
+        return self._parse_pointcloud(msg)
+
+    def call_service(
+        self, service: str, service_type: str, args: dict = None, timeout: float = None
+    ) -> dict:
+        """Call a ROS service via rosbridge and return the response.
+
+        Args:
+            service: ROS service name (e.g. '/buffer_server/lookup_transform')
+            service_type: ROS service type (e.g. 'tf2_msgs/srv/LookupTransform')
+            args: Service request arguments as dict
+            timeout: Timeout in seconds (default: self.default_timeout)
+
+        Returns:
+            dict: The service response values
+
+        Raises:
+            TimeoutError: If the service does not respond in time
+            RuntimeError: If the service call fails
+        """
+        timeout = timeout or self.default_timeout
+        ws = self._ensure_connected()
+
+        call_id = f"call_service:{service}:{uuid.uuid4().hex[:8]}"
+        msg = {
+            "op": "call_service",
+            "id": call_id,
+            "service": service,
+            "type": service_type,
+            "args": args or {},
+        }
+        ws.send(json.dumps(msg))
+
+        ws.settimeout(timeout)
+        try:
+            while True:
+                raw = ws.recv()
+                data = json.loads(raw)
+                if data.get("op") == "service_response" and data.get("id") == call_id:
+                    if not data.get("result", True):
+                        raise RuntimeError(
+                            f"Service call to {service} failed: {data.get('values', {})}"
+                        )
+                    return data.get("values", {})
+        except websocket.WebSocketTimeoutException:
+            raise TimeoutError(f"Timeout calling service {service}")
+
+    def send_action_goal(
+        self, action_name: str, action_type: str, goal: dict, timeout: float = None
+    ) -> dict:
+        """Send an action goal via rosbridge and wait for the result.
+
+        Args:
+            action_name: ROS action name (e.g. '/tf2_buffer_server')
+            action_type: ROS action type (e.g. 'tf2_msgs/action/LookupTransform')
+            goal: Action goal as dict
+            timeout: Timeout in seconds (default: self.default_timeout)
+
+        Returns:
+            dict: The action result
+
+        Raises:
+            TimeoutError: If the action does not complete in time
+            RuntimeError: If the action fails
+        """
+        timeout = timeout or self.default_timeout
+        ws = self._ensure_connected()
+
+        goal_id = f"action:{action_name}:{uuid.uuid4().hex[:8]}"
+        msg = {
+            "op": "send_action_goal",
+            "id": goal_id,
+            "action": action_name,
+            "action_type": action_type,
+            "args": goal,
+        }
+        ws.send(json.dumps(msg))
+
+        ws.settimeout(timeout)
+        try:
+            while True:
+                raw = ws.recv()
+                data = json.loads(raw)
+                if data.get("id") == goal_id and data.get("op") == "action_result":
+                    if not data.get("result", True):
+                        raise RuntimeError(
+                            f"Action {action_name} failed: {data.get('values', {})}"
+                        )
+                    return data.get("values", {})
+        except websocket.WebSocketTimeoutException:
+            raise TimeoutError(f"Timeout waiting for action {action_name}")
 
     def publish(self, topic: str, msg_type: str, msg: dict) -> None:
         """Publish a message to a ROS topic via rosbridge.

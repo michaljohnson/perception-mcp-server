@@ -3,7 +3,6 @@
 from fastmcp import FastMCP
 
 from perception_mcp.tools.detection import register_detection_tools
-from perception_mcp.tools.localization import register_localization_tools
 from perception_mcp.tools.grasping import register_grasping_tools
 from perception_mcp.tools.segmentation import register_segmentation_tools
 from perception_mcp.utils.vision import create_vision_client
@@ -43,7 +42,9 @@ def register_all_tools(
         base_url=vision_base_url,
     )
 
+    # Shared cache for segmentation results (pointcloud, etc.)
+    segmentation_cache = {}
+
     register_detection_tools(mcp, ws_manager, vision_client, camera_topics)
-    register_localization_tools(mcp, ws_manager, vision_client, camera_topics)
-    register_grasping_tools(mcp, ws_manager, vision_client, camera_topics)
-    register_segmentation_tools(mcp, ws_manager)
+    register_grasping_tools(mcp, ws_manager, segmentation_cache)
+    register_segmentation_tools(mcp, ws_manager, segmentation_cache)
