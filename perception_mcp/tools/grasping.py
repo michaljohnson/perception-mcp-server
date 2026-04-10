@@ -152,9 +152,21 @@ def register_grasping_tools(
             "size": {"x": round(float(size[0]), 4), "y": round(float(size[1]), 4), "z": round(float(size[2]), 4)},
         }
 
-        # TF lookup: camera frame → base_footprint
+        # TF lookup: camera frame → base_footprint.
+        # Prefer the TF snapshot captured at segmentation time (so the
+        # cached pointcloud is transformed with the TF that was valid when
+        # it was captured). Fall back to a fresh lookup if unavailable.
         try:
-            translation, rotation = _tf_lookup(ws_manager, source_frame=frame_id)
+            cached_t = segmentation_cache.get("tf_translation")
+            cached_r = segmentation_cache.get("tf_rotation")
+            if cached_t and cached_r and all(
+                k in cached_t for k in ("x", "y", "z")
+            ) and all(k in cached_r for k in ("x", "y", "z", "w")):
+                translation, rotation = cached_t, cached_r
+            else:
+                translation, rotation = _tf_lookup(
+                    ws_manager, source_frame=frame_id
+                )
             centroid_base = _transform_point(centroid_camera, translation, rotation)
 
             grasp_pose = {

@@ -28,19 +28,22 @@ def register_detection_tools(
             "Detect objects in the robot's camera view using vision AI.\n\n"
             "Can detect any object by name (e.g., 'scissors', 'brown basket', 'cube').\n"
             "Returns bounding boxes, confidence scores, and pixel coordinates.\n\n"
+            "Use 'front' camera for general scene scanning and finding locations.\n"
+            "Use 'arm' camera for close-up detection of objects on surfaces (tables, counters).\n\n"
             "Example usage:\n"
-            "- detect_objects(prompt='scissors')\n"
-            "- detect_objects(prompt='scissors', camera='arm')  # use arm camera\n"
-            "- detect_objects()  # detect all objects using front camera\n"
+            "- detect_objects(prompt='scissors')  # front camera\n"
+            "- detect_objects(prompt='spatula', camera='arm')  # arm camera close-up\n"
+            "- detect_objects()  # detect all visible objects (front camera)\n"
         ),
     )
     def detect_objects(prompt: str = "", camera: str = "front") -> dict:
-        """Detect objects in the current camera image.
+        """Detect objects in a camera image.
 
         Args:
             prompt: Object to search for (e.g., 'scissors', 'cube').
                     Leave empty to detect all visible objects.
-            camera: Which camera to use - 'front' (default) or 'arm'.
+            camera: Which camera to use - 'front' (default) for scene scanning,
+                    'arm' for close-up detection on surfaces.
 
         Returns:
             dict with detected objects, their bounding boxes, and pixel coordinates.
@@ -60,33 +63,28 @@ def register_detection_tools(
         except Exception as e:
             return {"error": f"Vision API call failed: {str(e)}"}
 
-        # Save annotated image
-        _save_annotated_image(img_bytes, result.get("objects", []))
+        # Save annotated image with camera name
+        _save_annotated_image(img_bytes, result.get("objects", []), camera)
 
         return result
 
     @mcp.tool(
         description=(
-            "Describe the scene visible from the robot's camera.\n\n"
+            "Describe the scene visible from the robot's front camera.\n\n"
             "Provides a detailed description including room type, visible objects,\n"
             "surfaces, and navigation hints. Useful for exploration and semantic search.\n\n"
             "Example usage:\n"
-            "- describe_scene()  # What does the robot see? (front camera)\n"
-            "- describe_scene(camera='arm')  # What does the arm camera see?\n"
+            "- describe_scene()  # What does the robot see?\n"
         ),
     )
-    def describe_scene(camera: str = "front") -> dict:
-        """Describe the current scene from the robot's camera.
-
-        Args:
-            camera: Which camera to use - 'front' (default) or 'arm'.
+    def describe_scene() -> dict:
+        """Describe the current scene from the robot's front camera.
 
         Returns:
             dict with scene description, room type, objects, surfaces,
             and navigation hints.
         """
-        topics = camera_topics.get(camera, camera_topics["front"])
-        rgb_topic = topics["rgb"]
+        rgb_topic = camera_topics["front"]["rgb"]
 
         try:
             img_bytes = ws_manager.get_compressed_image(rgb_topic, timeout=10.0)
@@ -101,7 +99,7 @@ def register_detection_tools(
             return {"error": f"Vision API call failed: {str(e)}"}
 
 
-def _save_annotated_image(img_bytes: bytes, objects: list) -> None:
+def _save_annotated_image(img_bytes: bytes, objects: list, camera: str = "front") -> None:
     """Save image with bounding boxes drawn on detected objects."""
     try:
         os.makedirs(CAMERA_DIR, exist_ok=True)
@@ -116,6 +114,6 @@ def _save_annotated_image(img_bytes: bytes, objects: list) -> None:
                 draw.rectangle([x1, y1, x2, y2], outline="red", width=2)
                 draw.text((x1, y1 - 12), name, fill="red")
 
-        img.save(os.path.join(CAMERA_DIR, "detected.jpeg"), "JPEG")
+        img.save(os.path.join(CAMERA_DIR, f"{camera}_detected.jpeg"), "JPEG")
     except Exception:
         pass  # Don't fail the tool if annotation fails

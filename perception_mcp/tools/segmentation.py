@@ -148,6 +148,33 @@ def register_segmentation_tools(
                 segmentation_cache["frame_id"] = frame_id
                 segmentation_cache["prompt"] = prompt
                 segmentation_cache["timestamp"] = time.time()
+                # Snapshot the camera→base_footprint TF at segmentation
+                # time and cache it. This ensures that a later
+                # get_grasp_from_pointcloud call produces a correct base-frame
+                # centroid even if the base or arm moved in between: the
+                # pointcloud points were captured relative to the camera pose
+                # at THIS instant, and must be transformed with the TF at
+                # THIS instant (not a fresh lookup at call time).
+                segmentation_cache.pop("tf_translation", None)
+                segmentation_cache.pop("tf_rotation", None)
+                try:
+                    tf_result = ws_manager.send_action_goal(
+                        action_name="/tf2_buffer_server",
+                        action_type="tf2_msgs/action/LookupTransform",
+                        goal={
+                            "target_frame": "base_footprint",
+                            "source_frame": frame_id,
+                            "source_time": {"sec": 0, "nanosec": 0},
+                            "timeout": {"sec": 2, "nanosec": 0},
+                            "advanced": False,
+                        },
+                        timeout=5.0,
+                    )
+                    tf = tf_result.get("transform", {}).get("transform", {})
+                    segmentation_cache["tf_translation"] = tf.get("translation", {})
+                    segmentation_cache["tf_rotation"] = tf.get("rotation", {})
+                except Exception:
+                    pass  # grasping tool will fall back to a fresh lookup
                 pc_info = f" Point cloud cached ({len(points)} points)."
             else:
                 pc_info = " Warning: point cloud not captured."
