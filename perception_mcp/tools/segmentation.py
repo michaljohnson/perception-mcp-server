@@ -1,13 +1,15 @@
-"""LangSAM segmentation tools via the icclab_summit_xl segmentation ROS node.
+"""SAM3 segmentation tools via the icclab_summit_xl segmentation ROS node.
 
-Triggers the segmentation_node (GroundingDINO + SAM2) by publishing a text
-prompt to /segment_text and waiting for the result on /segmentation_status.
-The node also publishes /segmentation_mask and /segmented_pointcloud.
+Triggers a segmentation_node_remote instance by publishing a text prompt to
+/segment_text (arm camera) or /front/segment_text (front camera) and waiting
+for the result on /segmentation_status. The node also publishes
+/segmentation_mask and /segmented_pointcloud (prefixed for the front camera).
 
 The segmented point cloud is cached in memory so that get_grasp_from_pointcloud
 can read it without re-subscribing (avoids QoS/timing issues with rosbridge).
 
-Requires: ros2 launch icclab_summit_xl segmentation.launch.py
+Requires: start_ros_stack.sh launches both arm_segmentation_node and
+front_segmentation_node.
 """
 
 import json
@@ -29,31 +31,61 @@ def register_segmentation_tools(
 
     @mcp.tool(
         description=(
-            "Segment objects using LangSAM (GroundingDINO + SAM2).\n\n"
-            "Sends a text prompt to the segmentation_node ROS node which runs\n"
-            "LangSAM. Produces pixel-precise segmentation masks\n"
-            "and a segmented point cloud.\n\n"
-            "PREREQUISITE: The segmentation node must be running:\n"
-            "  ros2 launch icclab_summit_xl segmentation_remote.launch.py\n\n"
+            "Segment objects using SAM3 (remote GroundingDINO + SAM).\n\n"
+            "Sends a text prompt to a segmentation_node_remote ROS instance\n"
+            "and produces a pixel-precise mask plus a segmented point cloud.\n"
+            "Two cameras are supported:\n"
+            "  camera='arm'   (default) — arm_camera, use for grasping\n"
+            "  camera='front' — front_rgbd_camera, use for approach/nav\n\n"
+            "The arm camera can only see objects when the arm is lowered into\n"
+            "a look-down pose; the front camera sees the scene from far away\n"
+            "and is the right choice for the navigator to refine its approach\n"
+            "pose while the arm stays in 'look_forward'.\n\n"
+            "PREREQUISITE: both segmentation nodes must be running; they are\n"
+            "started automatically by start_ros_stack.sh.\n\n"
             "The segmented point cloud is cached so that\n"
-            "get_grasp_from_pointcloud() can access it immediately.\n\n"
+            "get_grasp_from_pointcloud() can access it immediately; the cached\n"
+            "frame_id is the camera's optical frame and is transformed to\n"
+            "base_footprint via TF inside get_grasp_from_pointcloud.\n\n"
             "Example usage:\n"
-            "- segment_objects(prompt='scissors')\n"
-            "- segment_objects(prompt='red cube')\n"
-            "- segment_objects(prompt='bottle')\n"
+            "- segment_objects(prompt='red ball', camera='front')\n"
+            "- segment_objects(prompt='scissors', camera='arm')\n"
+            "- segment_objects(prompt='bottle')  # defaults to arm\n"
         ),
     )
-    def segment_objects(prompt: str, timeout: float = 30.0) -> dict:
-        """Segment objects by sending a text prompt to the LangSAM ROS node.
+    def segment_objects(
+        prompt: str,
+        camera: str = "arm",
+        timeout: float = 30.0,
+    ) -> dict:
+        """Segment objects by sending a text prompt to a SAM3 ROS node.
 
         Args:
             prompt: Text description of objects to find (e.g. 'scissors', 'cube').
+            camera: Which segmentation node to trigger — 'arm' (default) for
+                    grasping, 'front' for far-away detection during navigation.
             timeout: Max seconds to wait for segmentation result (default 30s,
                      first call may take longer due to model loading).
 
         Returns:
             dict with segmentation status and cached point cloud info.
         """
+        camera = (camera or "arm").lower()
+        if camera == "arm":
+            topic_prefix = ""
+        elif camera == "front":
+            topic_prefix = "/front"
+        else:
+            return {
+                "error": (
+                    f"Unknown camera '{camera}'. Use 'arm' (default) or 'front'."
+                )
+            }
+
+        text_topic = f"{topic_prefix}/segment_text"
+        status_topic = f"{topic_prefix}/segmentation_status"
+        pointcloud_topic = f"{topic_prefix}/segmented_pointcloud"
+        mask_topic = f"{topic_prefix}/segmentation_mask"
         # Start listening for the pointcloud BEFORE triggering segmentation,
         # using a dedicated websocket connection to avoid conflicts with the
         # main ws_manager connection (which will be used for status polling).
@@ -70,7 +102,7 @@ def register_segmentation_tools(
                 pc_ws.send(json.dumps({
                     "op": "subscribe",
                     "id": sub_id,
-                    "topic": "/segmented_pointcloud",
+                    "topic": pointcloud_topic,
                     "type": "sensor_msgs/msg/PointCloud2",
                 }))
 
@@ -79,7 +111,7 @@ def register_segmentation_tools(
                 while True:
                     raw = pc_ws.recv()
                     data = json.loads(raw)
-                    if data.get("topic") == "/segmented_pointcloud":
+                    if data.get("topic") == pointcloud_topic:
                         # Parse the pointcloud inline
                         msg = data.get("msg", {})
                         points, colors, frame_id = ws_manager._parse_pointcloud(msg)
@@ -89,7 +121,7 @@ def register_segmentation_tools(
                 pc_ws.send(json.dumps({
                     "op": "unsubscribe",
                     "id": sub_id,
-                    "topic": "/segmented_pointcloud",
+                    "topic": pointcloud_topic,
                 }))
                 pc_ws.close()
             except Exception as e:
@@ -101,12 +133,12 @@ def register_segmentation_tools(
         # Give the subscriber a moment to register with rosbridge
         time.sleep(0.5)
 
-        # Publish the text prompt to /segment_text
+        # Publish the text prompt to the selected camera's /segment_text
         try:
             ws = ws_manager._ensure_connected()
             pub_msg = {
                 "op": "publish",
-                "topic": "/segment_text",
+                "topic": text_topic,
                 "type": "std_msgs/msg/String",
                 "msg": {"data": prompt},
             }
@@ -123,16 +155,18 @@ def register_segmentation_tools(
                 if remaining <= 0:
                     raise TimeoutError("Timed out waiting for segmentation result")
                 status_msg = ws_manager.subscribe_once(
-                    "/segmentation_status",
+                    status_topic,
                     msg_type="std_msgs/msg/String",
                     timeout=remaining,
                 )
                 status = status_msg.get("data", "UNKNOWN")
         except TimeoutError:
             return {
-                "error": f"Timeout ({timeout}s) waiting for segmentation result. "
-                "Is the segmentation node running? Launch it with: "
-                "ros2 launch icclab_summit_xl segmentation_remote.launch.py"
+                "error": (
+                    f"Timeout ({timeout}s) waiting for segmentation result on "
+                    f"{status_topic}. Is the {camera}-camera segmentation node "
+                    f"running? Check start_ros_stack.sh logs."
+                )
             }
         except Exception as e:
             return {"error": f"Failed to get status: {str(e)}"}
@@ -147,6 +181,7 @@ def register_segmentation_tools(
                 segmentation_cache["colors"] = colors
                 segmentation_cache["frame_id"] = frame_id
                 segmentation_cache["prompt"] = prompt
+                segmentation_cache["camera"] = camera
                 segmentation_cache["timestamp"] = time.time()
                 # Snapshot the camera→base_footprint TF at segmentation
                 # time and cache it. This ensures that a later
@@ -182,12 +217,13 @@ def register_segmentation_tools(
             return {
                 "status": "SUCCESS",
                 "prompt": prompt,
+                "camera": camera,
                 "outputs": {
-                    "mask_topic": "/segmentation_mask",
-                    "pointcloud_topic": "/segmented_pointcloud",
+                    "mask_topic": mask_topic,
+                    "pointcloud_topic": pointcloud_topic,
                 },
                 "description": (
-                    f"Segmentation of '{prompt}' completed."
+                    f"Segmentation of '{prompt}' on {camera} camera completed."
                     f"{pc_info}"
                 ),
             }
@@ -195,11 +231,16 @@ def register_segmentation_tools(
             return {
                 "status": "NO_OBJECTS_FOUND",
                 "prompt": prompt,
-                "description": f"No objects matching '{prompt}' were found in the current camera view.",
+                "camera": camera,
+                "description": (
+                    f"No objects matching '{prompt}' were found in the "
+                    f"{camera} camera view."
+                ),
             }
         else:
             return {
                 "status": status,
                 "prompt": prompt,
+                "camera": camera,
                 "description": f"Segmentation returned status: {status}",
             }
