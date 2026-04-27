@@ -4,6 +4,7 @@ from fastmcp import FastMCP
 
 from perception_mcp.tools.detection import register_detection_tools
 from perception_mcp.tools.grasping import register_grasping_tools
+from perception_mcp.tools.placing import register_placing_tools
 from perception_mcp.tools.segmentation import register_segmentation_tools
 from perception_mcp.utils.vision import create_vision_client
 from perception_mcp.utils.websocket import WebSocketManager
@@ -47,4 +48,5 @@ def register_all_tools(
 
     register_detection_tools(mcp, ws_manager, vision_client, camera_topics)
     register_grasping_tools(mcp, ws_manager, segmentation_cache)
+    register_placing_tools(mcp, ws_manager, segmentation_cache)
     register_segmentation_tools(mcp, ws_manager, segmentation_cache)
