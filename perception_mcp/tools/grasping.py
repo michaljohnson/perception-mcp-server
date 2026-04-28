@@ -5,66 +5,15 @@ to the robot base frame via TF2, and returns ready-to-use grasp poses
 for MoveIt execution.
 """
 
-import numpy as np
 from fastmcp import FastMCP
 
+from perception_mcp.utils.transforms import (
+    GRIPPER_FINGER_OFFSET_M,
+    TOP_DOWN_ORIENTATION,
+    _tf_lookup,
+    _transform_point,
+)
 from perception_mcp.utils.websocket import WebSocketManager
-
-# Robotiq 2F-140 finger length offset (wrist frame → fingertip)
-GRIPPER_FINGER_OFFSET_M = 0.14
-
-# Top-down grasp orientation: gripper pointing straight down
-# (180° rotation about X axis — EEF frame has Z-up, so flip to Z-down)
-TOP_DOWN_ORIENTATION = {"x": 1.0, "y": 0.0, "z": 0.0, "w": 0.0}
-
-
-def _quat_to_rotation_matrix(qx, qy, qz, qw):
-    """Convert quaternion to 3x3 rotation matrix (pure numpy)."""
-    return np.array([
-        [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qz*qw),     2*(qx*qz + qy*qw)],
-        [2*(qx*qy + qz*qw),     1 - 2*(qx*qx + qz*qz),  2*(qy*qz - qx*qw)],
-        [2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw),       1 - 2*(qx*qx + qy*qy)],
-    ])
-
-
-def _tf_lookup(ws_manager, source_frame, target_frame="base_footprint", timeout=5.0):
-    """Look up TF transform via the tf2_buffer_server action.
-
-    In ROS 2 Jazzy, LookupTransform is an action (not a service).
-
-    Returns (translation, rotation) or raises on failure.
-    translation: dict with x, y, z
-    rotation: dict with x, y, z, w
-    """
-    result = ws_manager.send_action_goal(
-        action_name="/tf2_buffer_server",
-        action_type="tf2_msgs/action/LookupTransform",
-        goal={
-            "target_frame": target_frame,
-            "source_frame": source_frame,
-            "source_time": {"sec": 0, "nanosec": 0},
-            "timeout": {"sec": int(timeout), "nanosec": 0},
-            "advanced": False,
-        },
-        timeout=timeout + 2.0,
-    )
-    transform = result.get("transform", {}).get("transform", {})
-    translation = transform.get("translation", {})
-    rotation = transform.get("rotation", {})
-    return translation, rotation
-
-
-def _transform_point(point, translation, rotation):
-    """Transform a 3D point using a TF translation + quaternion rotation."""
-    R = _quat_to_rotation_matrix(
-        rotation["x"], rotation["y"], rotation["z"], rotation["w"]
-    )
-    p = np.array([point["x"], point["y"], point["z"]])
-    t = np.array([translation["x"], translation["y"], translation["z"]])
-    result = R @ p + t
-    return {"x": round(float(result[0]), 4),
-            "y": round(float(result[1]), 4),
-            "z": round(float(result[2]), 4)}
 
 
 def register_grasping_tools(
@@ -89,11 +38,11 @@ def register_grasping_tools(
             "plan_to_pose or plan_and_execute tool.\n\n"
             "Example usage:\n"
             "- First: segment_objects(prompt='scissors')\n"
-            "- Then: get_grasp_from_pointcloud(object_name='scissors')\n"
+            "- Then: get_topdown_grasp_pose(object_name='scissors')\n"
             "- Then: plan_and_execute with the returned grasp_pose\n"
         ),
     )
-    def get_grasp_from_pointcloud(
+    def get_topdown_grasp_pose(
         object_name: str,
         pointcloud_topic: str = "/segmented_pointcloud",
         timeout: float = 10.0,
