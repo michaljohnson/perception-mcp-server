@@ -1,10 +1,11 @@
-"""Vision API wrapper for object detection and scene understanding.
+"""Vision API wrapper for scene understanding (describe_scene tool).
 
-Supports multiple backends:
-- Claude (Anthropic API)
-- OpenAI-compatible (Qwen3-VL, Ollama, vLLM, etc.)
-
-Set VISION_BACKEND=openai and OPENAI_BASE_URL to use ZHAW Qwen3-VL or similar.
+Supports multiple backends, selected at startup via the VISION_BACKEND env
+var:
+- "anthropic": Anthropic-API-compatible vision models (Claude family).
+- "openai":    OpenAI-API-compatible endpoints — hosted OpenAI, vLLM,
+                Ollama, LM Studio, or any service that speaks the
+                OpenAI Chat Completions API.
 """
 
 import base64
@@ -46,36 +47,6 @@ def create_vision_client(
 # Shared prompts
 # --------------------------------------------------------------------------
 
-def _detect_prompt(prompt: str = "") -> str:
-    if prompt:
-        return (
-            f'Detect the following object(s) in the image: "{prompt}"\n\n'
-            "Return a JSON object with:\n"
-            '- "objects": array of objects found, each with:\n'
-            '  - "name": object name\n'
-            '  - "bbox": [x1, y1, x2, y2] as pixel coordinates\n'
-            '  - "confidence": float 0-1\n'
-            '  - "description": brief description of the object\n'
-            '  - "center_x": center x pixel coordinate\n'
-            '  - "center_y": center y pixel coordinate\n'
-            '- "scene_description": brief description of the scene\n\n'
-            "Return ONLY valid JSON, no markdown or extra text."
-        )
-    return (
-        "Detect all notable objects in this image.\n\n"
-        "Return a JSON object with:\n"
-        '- "objects": array of objects found, each with:\n'
-        '  - "name": object name\n'
-        '  - "bbox": [x1, y1, x2, y2] as pixel coordinates\n'
-        '  - "confidence": float 0-1\n'
-        '  - "description": brief description of the object\n'
-        '  - "center_x": center x pixel coordinate\n'
-        '  - "center_y": center y pixel coordinate\n'
-        '- "scene_description": brief description of the scene\n\n'
-        "Return ONLY valid JSON, no markdown or extra text."
-    )
-
-
 def _scene_prompt() -> str:
     return (
         "You are a robot's perception system. Analyze this image from the robot's camera.\n\n"
@@ -85,23 +56,6 @@ def _scene_prompt() -> str:
         '- "objects": list of visible object names\n'
         '- "surfaces": list of surfaces that objects could be placed on/picked from\n'
         '- "navigation_hints": suggestions for where to go or look next\n\n'
-        "Return ONLY valid JSON, no markdown or extra text."
-    )
-
-
-def _grasp_prompt(object_name: str) -> str:
-    return (
-        f'You are a robot grasp planner. Plan how to grasp the "{object_name}" in this image.\n\n'
-        "Return a JSON object with:\n"
-        '- "object_found": boolean\n'
-        '- "center_x": pixel x coordinate of object center\n'
-        '- "center_y": pixel y coordinate of object center\n'
-        '- "grasp_type": "top_down", "side", or "angled"\n'
-        '- "approach_direction": "from_above", "from_front", "from_left", "from_right"\n'
-        '- "gripper_orientation": "horizontal", "vertical", or angle in degrees\n'
-        '- "estimated_width_cm": estimated object width for gripper opening\n'
-        '- "obstacles_nearby": list of nearby obstacles to avoid\n'
-        '- "notes": any additional grasp planning notes\n\n'
         "Return ONLY valid JSON, no markdown or extra text."
     )
 
@@ -168,14 +122,8 @@ class AnthropicVisionClient:
         )
         return _parse_json_response(response.content[0].text)
 
-    def detect_objects(self, image_bytes: bytes, prompt: str = "", image_format: str = "jpeg") -> dict:
-        return self._call(image_bytes, _detect_prompt(prompt), image_format)
-
     def describe_scene(self, image_bytes: bytes, image_format: str = "jpeg") -> dict:
         return self._call(image_bytes, _scene_prompt(), image_format)
-
-    def estimate_grasp_approach(self, image_bytes: bytes, object_name: str, image_format: str = "jpeg") -> dict:
-        return self._call(image_bytes, _grasp_prompt(object_name), image_format)
 
 
 # --------------------------------------------------------------------------
@@ -189,7 +137,7 @@ class OpenAIVisionClient:
         self,
         api_key: str = "dummy",
         model: str = "QuantTrio/Qwen3-VL-30B-A3B-Instruct-AWQ",
-        base_url: str = "http://172.20.1.1:8000/v1",
+        base_url: str = "http://127.0.0.1:8000/v1",
     ):
         from openai import OpenAI
         self.client = OpenAI(api_key=api_key, base_url=base_url)
@@ -217,11 +165,5 @@ class OpenAIVisionClient:
         )
         return _parse_json_response(response.choices[0].message.content)
 
-    def detect_objects(self, image_bytes: bytes, prompt: str = "", image_format: str = "jpeg") -> dict:
-        return self._call(image_bytes, _detect_prompt(prompt), image_format)
-
     def describe_scene(self, image_bytes: bytes, image_format: str = "jpeg") -> dict:
         return self._call(image_bytes, _scene_prompt(), image_format)
-
-    def estimate_grasp_approach(self, image_bytes: bytes, object_name: str, image_format: str = "jpeg") -> dict:
-        return self._call(image_bytes, _grasp_prompt(object_name), image_format)

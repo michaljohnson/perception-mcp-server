@@ -1,8 +1,11 @@
 """Perception MCP Server - MCP instance and main entry point.
 
-Supports two vision backends:
-- "anthropic": Claude Vision API (requires ANTHROPIC_API_KEY)
-- "openai": OpenAI-compatible API like ZHAW Qwen3-VL (requires OPENAI_BASE_URL)
+Provider-agnostic vision: configure via .env / environment variables.
+- VISION_BACKEND="anthropic" — any Anthropic-API-compatible vision model
+- VISION_BACKEND="openai"    — any OpenAI-API-compatible vision model
+                               (Qwen3-VL via vLLM, Ollama, etc.)
+- VISION_API_KEY, VISION_MODEL, VISION_BASE_URL select the credentials,
+  model id, and endpoint for the chosen backend.
 """
 
 import argparse
@@ -23,8 +26,10 @@ from perception_mcp.utils.websocket import WebSocketManager
 ROSBRIDGE_IP = os.environ.get("ROSBRIDGE_IP", "127.0.0.1")
 ROSBRIDGE_PORT = int(os.environ.get("ROSBRIDGE_PORT", "9090"))
 
-# Vision backend settings
+# Vision backend settings (provider-agnostic; configure in .env)
 VISION_BACKEND = os.environ.get("VISION_BACKEND", "openai")  # "anthropic" or "openai"
+# VISION_API_KEY is the canonical key. As a convenience for users who
+# already export ANTHROPIC_API_KEY in their shell, fall back to that.
 VISION_API_KEY = os.environ.get("VISION_API_KEY", os.environ.get("ANTHROPIC_API_KEY", "dummy"))
 VISION_MODEL = os.environ.get("VISION_MODEL", "")  # Empty = use default per backend
 VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://127.0.0.1:8000/v1")
@@ -32,7 +37,7 @@ VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://127.0.0.1:8000/v1")
 # Remote SAM3 segmentation server (used by segmentation_remote nodes,
 # not by perception MCP directly — but checked at startup so we surface
 # the failure here instead of making segment_objects time out silently).
-SAM3_REMOTE_URL = os.environ.get("SAM3_REMOTE_URL", "http://160.85.252.39:8001")
+SAM3_REMOTE_URL = os.environ.get("SAM3_REMOTE_URL", "")
 
 # Camera topics per camera
 CAMERA_TOPICS = {
@@ -73,13 +78,13 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Using ZHAW Qwen3-VL (default, free)
+  # Using a local OpenAI-compatible vision endpoint (default)
   python server.py --transport streamable-http --port 8003
 
-  # Using Claude Vision API
+  # Using an Anthropic vision model
   VISION_BACKEND=anthropic VISION_API_KEY=sk-ant-... python server.py
 
-  # Custom OpenAI-compatible endpoint
+  # Custom OpenAI-compatible endpoint (vLLM, Ollama, hosted, ...)
   VISION_BACKEND=openai VISION_BASE_URL=http://localhost:11434/v1 python server.py
         """,
     )
@@ -168,13 +173,14 @@ def _startup_health_check():
             file=sys.stderr,
         )
 
-    # 3. Vision API key (required for describe_scene + detect_objects)
+    # 3. Vision API key (required for describe_scene)
     if VISION_BACKEND == "anthropic":
         if not VISION_API_KEY or VISION_API_KEY == "dummy" or not VISION_API_KEY.startswith("sk-"):
             print(
                 "[health] ERROR: VISION_BACKEND=anthropic but no valid API key found.\n"
-                "        describe_scene and detect_objects will fail with 401.\n"
-                "        Set ANTHROPIC_API_KEY (or VISION_API_KEY) in the\n"
+                "        describe_scene will fail with 401.\n"
+                "        Set VISION_API_KEY (or your provider's native env\n"
+                "        var, e.g. ANTHROPIC_API_KEY) in the\n"
                 "        perception-mcp-server environment / .env file.",
                 file=sys.stderr,
             )
@@ -187,7 +193,7 @@ def _startup_health_check():
         if not VISION_API_KEY or VISION_API_KEY == "dummy":
             print(
                 f"[health] WARN: VISION_BACKEND=openai with no API key set.\n"
-                f"        OK for endpoints that don't auth (e.g. ZHAW Qwen3-VL),\n"
+                f"        OK for self-hosted endpoints that don't require auth,\n"
                 f"        but will 401 on real OpenAI / paid endpoints.\n"
                 f"        Endpoint: {VISION_BASE_URL}",
                 file=sys.stderr,
@@ -200,28 +206,36 @@ def _startup_health_check():
 
     # 4. Remote SAM3 server (used by segmentation_remote launches —
     #    not directly by this server, but failure surfaces as silent
-    #    segment_objects timeouts, so check it here.)
-    try:
-        req = urllib.request.Request(SAM3_REMOTE_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
+    #    segment_objects timeouts, so check it here when configured.)
+    if not SAM3_REMOTE_URL:
+        print(
+            "[health] SAM3_REMOTE_URL not set; skipping segmentation backend "
+            "check. Set it in .env to enable.",
+            file=sys.stderr,
+        )
+    else:
+        try:
+            req = urllib.request.Request(SAM3_REMOTE_URL, method="GET")
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                print(
+                    f"[health] SAM3 remote OK ({SAM3_REMOTE_URL}, HTTP {resp.status})",
+                    file=sys.stderr,
+                )
+        except urllib.error.HTTPError as e:
+            # 404/etc are fine — server is up, just no root handler
             print(
-                f"[health] SAM3 remote OK ({SAM3_REMOTE_URL}, HTTP {resp.status})",
+                f"[health] SAM3 remote OK ({SAM3_REMOTE_URL}, HTTP {e.code})",
                 file=sys.stderr,
             )
-    except urllib.error.HTTPError as e:
-        # 404/etc are fine — server is up, just no root handler
-        print(
-            f"[health] SAM3 remote OK ({SAM3_REMOTE_URL}, HTTP {e.code})",
-            file=sys.stderr,
-        )
-    except Exception as e:
-        print(
-            f"[health] ERROR: SAM3 remote NOT reachable at {SAM3_REMOTE_URL} ({e}).\n"
-            f"        segment_objects will hang or time out.\n"
-            f"        Check ZHAW server status / SSH tunnel / VPN.\n"
-            f"        Override with SAM3_REMOTE_URL env var if running locally.",
-            file=sys.stderr,
-        )
+        except Exception as e:
+            print(
+                f"[health] ERROR: SAM3 remote NOT reachable at "
+                f"{SAM3_REMOTE_URL} ({e}).\n"
+                f"        segment_objects will hang or time out.\n"
+                f"        Verify the segmentation backend is running and\n"
+                f"        reachable from this host.",
+                file=sys.stderr,
+            )
 
 
 def main():
@@ -232,7 +246,7 @@ def main():
     if VISION_BACKEND == "openai":
         print(f"Vision base URL: {VISION_BASE_URL}", file=sys.stderr)
         print(f"Vision model: {VISION_MODEL or '(default)'}", file=sys.stderr)
-    print("LangSAM: available via segmentation_node (icclab_summit_xl)", file=sys.stderr)
+    print("Segmentation: relies on an external SAM3 ROS node (see README).", file=sys.stderr)
     print(f"Rosbridge: {ROSBRIDGE_IP}:{ROSBRIDGE_PORT}", file=sys.stderr)
 
     _startup_health_check()

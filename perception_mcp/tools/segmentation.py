@@ -1,15 +1,17 @@
-"""SAM3 segmentation tools via the icclab_summit_xl segmentation ROS node.
+"""SAM3 segmentation tool wrapper.
 
-Triggers a segmentation_node_remote instance by publishing a text prompt to
-/segment_text (arm camera) or /front/segment_text (front camera) and waiting
-for the result on /segmentation_status. The node also publishes
-/segmentation_mask and /segmented_pointcloud (prefixed for the front camera).
+Triggers a SAM3-style segmentation ROS node (GroundingDINO + SAM) by
+publishing a text prompt to /segment_text (arm camera) or
+/front/segment_text (front camera) and waiting for a status reply on
+/segmentation_status. The node also publishes /segmentation_mask and
+/segmented_pointcloud (prefixed for the front camera).
 
-The segmented point cloud is cached in memory so that get_grasp_from_pointcloud
-can read it without re-subscribing (avoids QoS/timing issues with rosbridge).
+The segmented point cloud is cached in memory so that
+get_grasp_from_pointcloud / get_topdown_drop_pose can read it without
+re-subscribing (avoids QoS / timing issues with rosbridge).
 
-Requires: start_ros_stack.sh launches both arm_segmentation_node and
-front_segmentation_node.
+Requires: a segmentation ROS node running for each camera you want to
+query (arm + front, if both).
 """
 
 import json
