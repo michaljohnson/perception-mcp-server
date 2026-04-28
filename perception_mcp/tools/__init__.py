@@ -6,17 +6,12 @@ from perception_mcp.tools.detection import register_detection_tools
 from perception_mcp.tools.grasping import register_grasping_tools
 from perception_mcp.tools.placing import register_placing_tools
 from perception_mcp.tools.segmentation import register_segmentation_tools
-from perception_mcp.utils.vision import create_vision_client
 from perception_mcp.utils.websocket import WebSocketManager
 
 
 def register_all_tools(
     mcp: FastMCP,
     ws_manager: WebSocketManager,
-    vision_backend: str = "openai",
-    vision_api_key: str = "",
-    vision_model: str = "",
-    vision_base_url: str = "",
     camera_topics: dict = None,
 ) -> None:
     """Register all perception tools with the provided FastMCP instance."""
@@ -35,18 +30,10 @@ def register_all_tools(
             },
         }
 
-    # Create vision client once, shared by all tools
-    vision_client = create_vision_client(
-        backend=vision_backend,
-        api_key=vision_api_key,
-        model=vision_model,
-        base_url=vision_base_url,
-    )
-
     # Shared cache for segmentation results (pointcloud, etc.)
     segmentation_cache = {}
 
-    register_detection_tools(mcp, ws_manager, vision_client, camera_topics)
+    register_detection_tools(mcp, ws_manager, camera_topics)
     register_grasping_tools(mcp, ws_manager, segmentation_cache)
     register_placing_tools(mcp, ws_manager, segmentation_cache)
     register_segmentation_tools(mcp, ws_manager, segmentation_cache)

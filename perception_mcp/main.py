@@ -1,12 +1,4 @@
-"""Perception MCP Server - MCP instance and main entry point.
-
-Provider-agnostic vision: configure via .env / environment variables.
-- VISION_BACKEND="anthropic" — any Anthropic-API-compatible vision model
-- VISION_BACKEND="openai"    — any OpenAI-API-compatible vision model
-                               (Qwen3-VL via vLLM, Ollama, etc.)
-- VISION_API_KEY, VISION_MODEL, VISION_BASE_URL select the credentials,
-  model id, and endpoint for the chosen backend.
-"""
+"""Perception MCP Server - MCP instance and main entry point."""
 
 import argparse
 import os
@@ -25,14 +17,6 @@ from perception_mcp.utils.websocket import WebSocketManager
 # Connection settings
 ROSBRIDGE_IP = os.environ.get("ROSBRIDGE_IP", "127.0.0.1")
 ROSBRIDGE_PORT = int(os.environ.get("ROSBRIDGE_PORT", "9090"))
-
-# Vision backend settings (provider-agnostic; configure in .env)
-VISION_BACKEND = os.environ.get("VISION_BACKEND", "openai")  # "anthropic" or "openai"
-# VISION_API_KEY is the canonical key. As a convenience for users who
-# already export ANTHROPIC_API_KEY in their shell, fall back to that.
-VISION_API_KEY = os.environ.get("VISION_API_KEY", os.environ.get("ANTHROPIC_API_KEY", "dummy"))
-VISION_MODEL = os.environ.get("VISION_MODEL", "")  # Empty = use default per backend
-VISION_BASE_URL = os.environ.get("VISION_BASE_URL", "http://127.0.0.1:8000/v1")
 
 # Remote SAM3 segmentation server (used by segmentation_remote nodes,
 # not by perception MCP directly — but checked at startup so we surface
@@ -60,32 +44,17 @@ mcp = FastMCP("perception-mcp-server")
 ws_manager = WebSocketManager(ROSBRIDGE_IP, ROSBRIDGE_PORT, default_timeout=10.0)
 
 # Register all tools
-register_all_tools(
-    mcp,
-    ws_manager,
-    vision_backend=VISION_BACKEND,
-    vision_api_key=VISION_API_KEY,
-    vision_model=VISION_MODEL,
-    vision_base_url=VISION_BASE_URL,
-    camera_topics=CAMERA_TOPICS,
-)
+register_all_tools(mcp, ws_manager, camera_topics=CAMERA_TOPICS)
 
 
 def parse_arguments():
     """Parse command line arguments for MCP server configuration."""
     parser = argparse.ArgumentParser(
-        description="Perception MCP Server - Object detection and grasp planning for robots",
+        description="Perception MCP Server - segmentation, grasp / drop pose, raw camera access for robots",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Using a local OpenAI-compatible vision endpoint (default)
   python server.py --transport streamable-http --port 8003
-
-  # Using an Anthropic vision model
-  VISION_BACKEND=anthropic VISION_API_KEY=sk-ant-... python server.py
-
-  # Custom OpenAI-compatible endpoint (vLLM, Ollama, hosted, ...)
-  VISION_BACKEND=openai VISION_BASE_URL=http://localhost:11434/v1 python server.py
         """,
     )
 
@@ -113,7 +82,7 @@ Examples:
 def _startup_health_check():
     """Verify all perception MCP runtime dependencies.
 
-    Checks: rosbridge, tf2_buffer_server, vision API key, remote SAM3 server.
+    Checks: rosbridge, tf2_buffer_server, remote SAM3 server.
     Logs loud, actionable errors to stderr — server still starts so any tools
     that don't need the missing dependency can still run.
     """
@@ -173,38 +142,7 @@ def _startup_health_check():
             file=sys.stderr,
         )
 
-    # 3. Vision API key (required for describe_scene)
-    if VISION_BACKEND == "anthropic":
-        if not VISION_API_KEY or VISION_API_KEY == "dummy" or not VISION_API_KEY.startswith("sk-"):
-            print(
-                "[health] ERROR: VISION_BACKEND=anthropic but no valid API key found.\n"
-                "        describe_scene will fail with 401.\n"
-                "        Set VISION_API_KEY (or your provider's native env\n"
-                "        var, e.g. ANTHROPIC_API_KEY) in the\n"
-                "        perception-mcp-server environment / .env file.",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"[health] vision API key OK (anthropic, sk-...{VISION_API_KEY[-4:]})",
-                file=sys.stderr,
-            )
-    elif VISION_BACKEND == "openai":
-        if not VISION_API_KEY or VISION_API_KEY == "dummy":
-            print(
-                f"[health] WARN: VISION_BACKEND=openai with no API key set.\n"
-                f"        OK for self-hosted endpoints that don't require auth,\n"
-                f"        but will 401 on real OpenAI / paid endpoints.\n"
-                f"        Endpoint: {VISION_BASE_URL}",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                f"[health] vision API key OK (openai, {VISION_BASE_URL})",
-                file=sys.stderr,
-            )
-
-    # 4. Remote SAM3 server (used by segmentation_remote launches —
+    # 3. Remote SAM3 server (used by segmentation_remote launches —
     #    not directly by this server, but failure surfaces as silent
     #    segment_objects timeouts, so check it here when configured.)
     if not SAM3_REMOTE_URL:
@@ -242,10 +180,6 @@ def main():
     """Main entry point for the MCP server."""
     args = parse_arguments()
 
-    print(f"Vision backend: {VISION_BACKEND}", file=sys.stderr)
-    if VISION_BACKEND == "openai":
-        print(f"Vision base URL: {VISION_BASE_URL}", file=sys.stderr)
-        print(f"Vision model: {VISION_MODEL or '(default)'}", file=sys.stderr)
     print("Segmentation: relies on an external SAM3 ROS node (see README).", file=sys.stderr)
     print(f"Rosbridge: {ROSBRIDGE_IP}:{ROSBRIDGE_PORT}", file=sys.stderr)
 

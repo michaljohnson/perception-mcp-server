@@ -1,6 +1,6 @@
 # perception-mcp-server
 
-An [MCP](https://modelcontextprotocol.io) server that exposes a mobile-manipulation robot's perception primitives — segmentation, grasp planning, drop-pose planning, and scene description — as tools an LLM agent can call.
+An [MCP](https://modelcontextprotocol.io) server that exposes a mobile-manipulation robot's perception primitives — segmentation, grasp planning, drop-pose planning, and raw camera access — as tools an LLM agent can call.
 
 It is the perception layer in a larger stack where an LLM-driven agent uses MCP tools to drive a real (or simulated) robot through pick / place / navigate tasks. Other layers in the stack (exposed as separate MCP servers) typically handle motion planning (MoveIt), navigation (nav2), and direct ROS topic access.
 
@@ -11,7 +11,7 @@ To pick or place an object with a manipulator, an agent needs to translate "the 
 1. **Segmentation** — find the object in the image and produce a 3D point cloud of just that object.
 2. **Frame transform** — convert the cloud from the camera's optical frame into the robot's base frame (so a planner that thinks in base coordinates can use it).
 3. **Pose computation** — turn the point cloud into a single pose, with appropriate offsets for gripper geometry, drop clearance, etc.
-4. **Scene-level reasoning** — for navigation, a coarser "what room am I in, what's around me?" check.
+4. **Raw camera access** — for navigation / verification / debugging, a way for a multimodal agent to look at the robot's camera frames directly.
 
 This server packages those four operations as four MCP tools.
 
@@ -22,7 +22,7 @@ This server packages those four operations as four MCP tools.
 | `segment_objects` | mask + segmented point cloud (cached internally) | Always first — feeds the cache the other tools read. |
 | `get_grasp_from_pointcloud` | top-down `grasp_pose` in robot base frame | After `segment_objects` on the **arm** camera. For picking. |
 | `get_topdown_drop_pose` | top-down `place_pose` in robot base frame | After `segment_objects`. For placing onto a surface or into a container. |
-| `describe_scene` | room type, objects, surfaces, navigation hints | Coarse high-level scene check from a forward-facing camera. For arrival verification, not manipulation. |
+| `look` | raw camera frame(s) as JPEG `Image` content | Whenever the calling agent needs to look — area verification after navigation, gripper-state checks, or any "what does the robot actually see?" question. Returns front, arm, or both. |
 
 ### Sync execution
 
@@ -182,32 +182,32 @@ Computes a top-down drop pose using simple statistics on the cached (or raw) poi
 
 ---
 
-## `describe_scene()`
+## `look(camera="front")`
 
-Captures one frame from the front camera, sends it to the configured vision LLM (Anthropic, OpenAI-compatible, etc.), and returns a structured scene description.
+Returns the current frame from the requested camera as a JPEG `Image`
+content block (the FastMCP standard image type). Multimodal LLM clients
+receive the bytes directly and can reason on the pixels with their own
+vision capability — no inner LLM call is made here.
 
-### Returns
+### Parameters
 
-```json
-{"description": "...",
- "room_type": "kitchen" | "bedroom" | "living_room" | ...,
- "objects": ["...", ...],
- "surfaces": ["...", ...],
- "navigation_hints": "..."}
-```
+| `camera` | What it returns |
+|---|---|
+| `"front"` (default) | Single `Image` of the body-mounted forward camera. Sees the room and the robot's own arm. |
+| `"arm"` | Single `Image` of the wrist-mounted camera. Sees what the gripper is reaching for. |
+| `"both"` | `list[Image]` of `[front, arm]` back-to-back in one call. Useful for area / room judgments where the two angles complement each other. |
 
 ### When to use
 
-Coarse semantic check after a navigation goal completes — does the robot see what the agent expected to see? Treat this as a sanity gate, not a precise perception primitive: vision LLMs can return inconsistent `room_type` labels across viewing angles. If you need a strict check, gate on the `objects` list rather than `room_type`.
+- **Area verification after navigation** — "does this look like the kitchen?". `camera="both"` gives the chassis + wrist views together for a more confident judgment.
+- **Gripper-state checks after pick / place** — `camera="front"` shows the gripper in the upper part of the frame when the arm is in `look_forward`. The agent can confirm visually whether the gripper is empty or holding the right object.
+- **Any "what does the robot actually see right now?" debugging step.**
 
-This tool is **not** appropriate for grasp / drop planning — its output is text descriptions, not pixel-accurate masks or 3D points.
+This tool is **not** appropriate for grasp / drop planning — for that, use `segment_objects` + `get_grasp_from_pointcloud` / `get_topdown_drop_pose` for pixel-accurate masks and 3D points.
 
-### Vision backends
+### Why no inner LLM call
 
-- `VISION_BACKEND=anthropic` — any Anthropic vision-capable model (e.g. Claude 4.x).
-- `VISION_BACKEND=openai` — any OpenAI-compatible endpoint: hosted OpenAI, vLLM, Ollama, LM Studio, etc.
-
-The backend is wired in `perception_mcp/utils/vision.py`. Adding a third backend means subclassing `VisionClient` and registering a factory branch in `create_vision_client`.
+Earlier versions of this tool ran a vision LLM (Anthropic / OpenAI-compatible) inside the server and returned a structured text summary. We removed that: a structured summary forces a frozen schema, hides whether the inner LLM saw what it claimed to see, and adds a paid round-trip on every call. Returning raw pixels to a multimodal client is strictly more flexible — and the agent can do its own structured reasoning if it needs one.
 
 ---
 
@@ -217,10 +217,6 @@ The backend is wired in `perception_mcp/utils/vision.py`. Adding a third backend
 |---|---|---|
 | `ROSBRIDGE_IP` | `127.0.0.1` | rosbridge host. |
 | `ROSBRIDGE_PORT` | `9090` | rosbridge port. |
-| `VISION_BACKEND` | `openai` | `anthropic` or `openai`. |
-| `VISION_API_KEY` | `dummy` | API key for the chosen vision provider. Provider-agnostic. |
-| `VISION_MODEL` | backend-specific default | Any model id supported by the chosen backend. |
-| `VISION_BASE_URL` | `http://127.0.0.1:8000/v1` | Used only when `VISION_BACKEND=openai`. |
 | `SAM3_REMOTE_URL` | (unset) | Optional health check at startup, so a missing segmentation backend fails loud rather than silently inside `segment_objects`. |
 
 `load_dotenv` reads `.env` at the server root if present.
@@ -228,14 +224,7 @@ The backend is wired in `perception_mcp/utils/vision.py`. Adding a third backend
 ## Running
 
 ```bash
-# Default (OpenAI-compatible endpoint, e.g. vLLM)
 python server.py --transport streamable-http --port 8003
-
-# Anthropic Claude
-VISION_BACKEND=anthropic VISION_API_KEY=sk-ant-... python server.py
-
-# Local Ollama
-VISION_BACKEND=openai VISION_BASE_URL=http://localhost:11434/v1 python server.py
 ```
 
 ## Installation
@@ -244,18 +233,18 @@ VISION_BACKEND=openai VISION_BASE_URL=http://localhost:11434/v1 python server.py
 pip install -e .
 ```
 
-The server depends on `fastmcp`, `numpy`, `opencv-python`, `websocket-client`, `python-dotenv`, plus `anthropic` and/or `openai` for whichever vision backend you select. See `pyproject.toml` for exact versions.
+The server depends on `fastmcp`, `numpy`, `opencv-python`, `websocket-client`, and `python-dotenv`. See `pyproject.toml` for exact versions.
 
 ## Prerequisites at runtime
 
 - `rosbridge_websocket` reachable on `ROSBRIDGE_IP:PORT`.
 - `tf2_buffer_server` action server running, so TF lookups succeed.
 - For `segment_objects`: at least one segmentation ROS node running (arm camera, front camera, or both), backed by a reachable segmentation server.
-- For `describe_scene`: a reachable vision-LLM endpoint and a valid `VISION_API_KEY` for paid providers.
+- For `look`: at least one of the two RGB camera topics publishing as `sensor_msgs/CompressedImage` (defaults: `/front_rgbd_camera/color/image_raw/compressed`, `/arm_camera/color/image_raw/compressed`).
 
 ## Architecture notes
 
-- The server is a **thin MCP wrapper** around ROS topics, ROS actions, and a vision LLM. It does no learning of its own; the heavy lifting (SAM, GroundingDINO, the LLM) runs elsewhere.
+- The server is a **thin MCP wrapper** around ROS topics and ROS actions. It does no learning of its own; the heavy lifting (SAM, GroundingDINO) runs elsewhere.
 - The shared `segmentation_cache` and the `WebSocketManager` connection are **not thread-safe under parallel calls.** Currently safe because typical agent flows call perception sequentially; if you intentionally parallelize (e.g. concurrent arm + front segmentation), add a `threading.Lock` around cache writes and either partition the cache per-camera or wrap the websocket manager.
 - All TF lookups go through the `/tf2_buffer_server` action (LookupTransform is an action in ROS 2 Jazzy and later, not a service).
 - Pose computation tools (`get_grasp_from_pointcloud`, `get_topdown_drop_pose`) intentionally use plain numpy. They were rewritten from a heavier Open3D + DBSCAN + normal-filter pipeline; the simpler statistics performed equally well in practice and freed ~300 MB of dependencies plus a substantial chunk of process RAM.
@@ -269,13 +258,12 @@ perception-mcp-server/
 ├── perception_mcp/
 │   ├── main.py                     # tool registration + health checks
 │   ├── tools/
-│   │   ├── segmentation.py         # segment_objects (async)
+│   │   ├── segmentation.py         # segment_objects
 │   │   ├── grasping.py             # get_grasp_from_pointcloud + _tf_lookup helper
 │   │   ├── placing.py              # get_topdown_drop_pose
-│   │   └── detection.py            # describe_scene
+│   │   └── detection.py            # look
 │   └── utils/
-│       ├── websocket.py            # WebSocketManager: rosbridge / TF2 / topic I/O
-│       └── vision.py               # AnthropicVisionClient / OpenAIVisionClient
+│       └── websocket.py            # WebSocketManager: rosbridge / TF2 / topic I/O
 ```
 
 ## Limitations
@@ -283,7 +271,6 @@ perception-mcp-server/
 - **Top-down only.** Grasp and drop poses are always strictly top-down `(1,0,0,0)`. Side / angled approaches are not supported by these primitives.
 - **Single-cache design.** `segment_objects` overwrites a single internal cache. There is no per-camera cache, no history, and no thread-safety. Sequential agent flows are fine; concurrent flows need locks (see Architecture notes).
 - **Coupled to ROS 2 (rosbridge) for I/O.** Replacing rosbridge with native ROS 2 client libs (`rclpy`) is possible but not done; rosbridge is convenient for cross-process tool integration but adds latency.
-- **`describe_scene` is opinionated.** The JSON schema (`room_type`, `objects`, `surfaces`, `navigation_hints`) is hard-coded in the prompt; if you want different fields, edit `_scene_prompt()` in `vision.py`.
 
 ## License
 

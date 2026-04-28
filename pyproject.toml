@@ -1,7 +1,7 @@
 [project]
 name = "perception-mcp-server"
 version = "0.1.0"
-description = "Perception MCP Server for robotic object detection, 3D localization, and grasp planning using vision LLMs (Claude or Qwen3-VL)"
+description = "Perception MCP Server for robotic object detection, 3D localization, grasp planning, and raw camera access."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -12,8 +12,6 @@ authors = [
 dependencies = [
     "fastmcp>=2.11.3",
     "mcp[cli]>=1.13.0",
-    "anthropic>=0.49.0",
-    "openai>=1.0.0",
     "opencv-python>=4.11.0.86",
     "numpy>=1.24.0,<2",
     "websocket-client>=1.8.0",
