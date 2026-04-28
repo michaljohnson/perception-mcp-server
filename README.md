@@ -20,8 +20,8 @@ This server packages those four operations as four MCP tools.
 | Tool | Returns | When to use |
 |---|---|---|
 | `segment_objects` | mask + segmented point cloud (cached internally) | Always first — feeds the cache the other tools read. |
-| `get_grasp_from_pointcloud` | top-down `grasp_pose` in robot base frame | After `segment_objects` on the **arm** camera. For picking. |
-| `get_topdown_drop_pose` | top-down `place_pose` in robot base frame | After `segment_objects`. For placing onto a surface or into a container. |
+| `get_topdown_grasp_pose` | top-down `grasp_pose` in robot base frame | After `segment_objects` on the **arm** camera. For picking. |
+| `get_topdown_placing_pose` | top-down `place_pose` in robot base frame | After `segment_objects`. For placing onto a surface or into a container. |
 | `look` | raw camera frame(s) as JPEG `Image` content | Whenever the calling agent needs to look — area verification after navigation, gripper-state checks, or any "what does the robot actually see?" question. Returns front, arm, or both. |
 
 ### Sync execution
@@ -35,7 +35,7 @@ A complete pick attempt looks like this from the agent's side:
 ```
 segment_objects(prompt="red cup", camera="arm")
   → status: SUCCESS, point cloud cached
-get_grasp_from_pointcloud(object_name="red cup")
+get_topdown_grasp_pose(object_name="red cup")
   → grasp_pose at (0.65, -0.10, 0.42), top-down orientation
 [hand off to a motion-planning MCP to actually move the arm]
 ```
@@ -45,7 +45,7 @@ A pick + place sequence adds:
 ```
 segment_objects(prompt="trash bin", camera="arm")
   → status: SUCCESS
-get_topdown_drop_pose(object_name="trash bin", top_clearance_m=0.35)
+get_topdown_placing_pose(object_name="trash bin", top_clearance_m=0.35)
   → place_pose 35 cm above the highest point of the bin
 [hand off to motion planning to release the held object there]
 ```
@@ -81,7 +81,7 @@ On `SUCCESS` the tool caches:
 - `tf_translation`, `tf_rotation` from the camera optical frame to the robot base frame, **at the instant of segmentation**
 - diagnostics (`prompt`, `camera`, `timestamp`)
 
-The TF snapshot matters: a downstream `get_grasp_from_pointcloud` call may fire after the arm has moved, but the snapshot pins the transform that was valid for *those specific points*. A live TF lookup at compute time would silently apply the wrong transform.
+The TF snapshot matters: a downstream `get_topdown_grasp_pose` call may fire after the arm has moved, but the snapshot pins the transform that was valid for *those specific points*. A live TF lookup at compute time would silently apply the wrong transform.
 
 ### Returns
 
@@ -100,7 +100,7 @@ The TF snapshot matters: a downstream `get_grasp_from_pointcloud` call may fire 
 
 ---
 
-## `get_grasp_from_pointcloud(object_name, pointcloud_topic="/segmented_pointcloud", timeout=10.0)`
+## `get_topdown_grasp_pose(object_name, pointcloud_topic="/segmented_pointcloud", timeout=10.0)`
 
 Computes a top-down grasp pose from the cached point cloud (or, as a fallback, from a fresh subscription on `pointcloud_topic`). Pure numpy — no learned model, no normal estimation, no clustering.
 
@@ -109,7 +109,7 @@ Computes a top-down grasp pose from the cached point cloud (or, as a fallback, f
 1. Read point cloud from the cache (default) or the provided topic.
 2. `centroid = points.mean(axis=0)`; bounding box is `(min, max, max-min)`.
 3. TF-transform the centroid from camera optical frame to base frame, using the cached snapshot when available, otherwise a live `_tf_lookup` via the `/tf2_buffer_server` action.
-4. Apply a vertical gripper-finger offset to z (default 14 cm — Robotiq 2F-140; adjust at the top of `grasping.py` if your gripper differs).
+4. Apply a vertical gripper-finger offset to z (default 14 cm — Robotiq 2F-140; defined as `GRIPPER_FINGER_OFFSET_M` in `utils/transforms.py`, change there if your gripper differs).
 5. Set orientation to strict top-down `(x=1, y=0, z=0, w=0)`.
 
 ### Returns (success)
@@ -138,7 +138,7 @@ Call `segment_objects(camera="arm", ...)` first. The cache is camera-agnostic, b
 
 ---
 
-## `get_topdown_drop_pose(object_name, top_clearance_m=0.20, ...)`
+## `get_topdown_placing_pose(object_name, top_clearance_m=0.20, ...)`
 
 Computes a top-down drop pose using simple statistics on the cached (or raw) point cloud. The same algorithm handles surfaces (drop ON) and containers (drop INTO) — only the vertical clearance differs.
 
@@ -203,7 +203,7 @@ vision capability — no inner LLM call is made here.
 - **Gripper-state checks after pick / place** — `camera="front"` shows the gripper in the upper part of the frame when the arm is in `look_forward`. The agent can confirm visually whether the gripper is empty or holding the right object.
 - **Any "what does the robot actually see right now?" debugging step.**
 
-This tool is **not** appropriate for grasp / drop planning — for that, use `segment_objects` + `get_grasp_from_pointcloud` / `get_topdown_drop_pose` for pixel-accurate masks and 3D points.
+This tool is **not** appropriate for grasp / drop planning — for that, use `segment_objects` + `get_topdown_grasp_pose` / `get_topdown_placing_pose` for pixel-accurate masks and 3D points.
 
 ### Why no inner LLM call
 
@@ -247,7 +247,7 @@ The server depends on `fastmcp`, `numpy`, `opencv-python`, `websocket-client`, a
 - The server is a **thin MCP wrapper** around ROS topics and ROS actions. It does no learning of its own; the heavy lifting (SAM, GroundingDINO) runs elsewhere.
 - The shared `segmentation_cache` and the `WebSocketManager` connection are **not thread-safe under parallel calls.** Currently safe because typical agent flows call perception sequentially; if you intentionally parallelize (e.g. concurrent arm + front segmentation), add a `threading.Lock` around cache writes and either partition the cache per-camera or wrap the websocket manager.
 - All TF lookups go through the `/tf2_buffer_server` action (LookupTransform is an action in ROS 2 Jazzy and later, not a service).
-- Pose computation tools (`get_grasp_from_pointcloud`, `get_topdown_drop_pose`) intentionally use plain numpy. They were rewritten from a heavier Open3D + DBSCAN + normal-filter pipeline; the simpler statistics performed equally well in practice and freed ~300 MB of dependencies plus a substantial chunk of process RAM.
+- Pose computation tools (`get_topdown_grasp_pose`, `get_topdown_placing_pose`) intentionally use plain numpy. They were rewritten from a heavier Open3D + DBSCAN + normal-filter pipeline; the simpler statistics performed equally well in practice and freed ~300 MB of dependencies plus a substantial chunk of process RAM.
 
 ## Layout
 
@@ -259,11 +259,12 @@ perception-mcp-server/
 │   ├── main.py                     # tool registration + health checks
 │   ├── tools/
 │   │   ├── segmentation.py         # segment_objects
-│   │   ├── grasping.py             # get_grasp_from_pointcloud + _tf_lookup helper
-│   │   ├── placing.py              # get_topdown_drop_pose
+│   │   ├── grasping.py             # get_topdown_grasp_pose
+│   │   ├── placing.py              # get_topdown_placing_pose
 │   │   └── detection.py            # look
 │   └── utils/
-│       └── websocket.py            # WebSocketManager: rosbridge / TF2 / topic I/O
+│       ├── websocket.py            # WebSocketManager: rosbridge / TF2 / topic I/O
+│       └── transforms.py           # TOP_DOWN_ORIENTATION + TF helpers (shared by grasp/drop)
 ```
 
 ## Limitations

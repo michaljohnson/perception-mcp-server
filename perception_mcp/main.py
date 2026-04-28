@@ -130,7 +130,7 @@ def _startup_health_check():
         except Exception as e:
             print(
                 f"[health] ERROR: tf2_buffer_server NOT responding ({e}).\n"
-                f"        get_grasp_from_pointcloud will return grasp_pose=None.\n"
+                f"        get_topdown_grasp_pose will return grasp_pose=None.\n"
                 f"        Pick agents typically misread this as segmentation failure.\n"
                 f"        Start it with:\n"
                 f"          ros2 run tf2_ros buffer_server",

@@ -7,7 +7,7 @@ publishing a text prompt to /segment_text (arm camera) or
 /segmented_pointcloud (prefixed for the front camera).
 
 The segmented point cloud is cached in memory so that
-get_grasp_from_pointcloud / get_topdown_drop_pose can read it without
+get_topdown_grasp_pose / get_topdown_placing_pose can read it without
 re-subscribing (avoids QoS / timing issues with rosbridge).
 
 Requires: a segmentation ROS node running for each camera you want to
@@ -46,9 +46,9 @@ def register_segmentation_tools(
             "PREREQUISITE: both segmentation nodes must be running; they are\n"
             "started automatically by start_ros_stack.sh.\n\n"
             "The segmented point cloud is cached so that\n"
-            "get_grasp_from_pointcloud() can access it immediately; the cached\n"
+            "get_topdown_grasp_pose() can access it immediately; the cached\n"
             "frame_id is the camera's optical frame and is transformed to\n"
-            "base_footprint via TF inside get_grasp_from_pointcloud.\n\n"
+            "base_footprint via TF inside get_topdown_grasp_pose.\n\n"
             "Example usage:\n"
             "- segment_objects(prompt='red ball', camera='front')\n"
             "- segment_objects(prompt='scissors', camera='arm')\n"
@@ -187,7 +187,7 @@ def register_segmentation_tools(
                 segmentation_cache["timestamp"] = time.time()
                 # Snapshot the camera→base_footprint TF at segmentation
                 # time and cache it. This ensures that a later
-                # get_grasp_from_pointcloud call produces a correct base-frame
+                # get_topdown_grasp_pose call produces a correct base-frame
                 # centroid even if the base or arm moved in between: the
                 # pointcloud points were captured relative to the camera pose
                 # at THIS instant, and must be transformed with the TF at
