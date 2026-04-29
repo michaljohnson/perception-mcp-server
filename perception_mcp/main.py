@@ -50,7 +50,7 @@ register_all_tools(mcp, ws_manager, camera_topics=CAMERA_TOPICS)
 def parse_arguments():
     """Parse command line arguments for MCP server configuration."""
     parser = argparse.ArgumentParser(
-        description="Perception MCP Server - segmentation, grasp / drop pose, raw camera access for robots",
+        description="Perception MCP Server - segmentation, grasp / place pose, raw camera access for robots",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -108,7 +108,7 @@ def _startup_health_check():
             file=sys.stderr,
         )
 
-    # 2. tf2_buffer_server (required for grasp + drop-pose tools)
+    # 2. tf2_buffer_server (required for grasp + place-pose tools)
     if rosbridge_ok:
         try:
             result = ws_manager.send_action_goal(
