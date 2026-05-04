@@ -91,13 +91,26 @@ def register_segmentation_tools(
         # Start listening for the pointcloud BEFORE triggering segmentation,
         # using a dedicated websocket connection to avoid conflicts with the
         # main ws_manager connection (which will be used for status polling).
+        #
+        # IMPORTANT: /segmented_pointcloud is TRANSIENT_LOCAL (latched), so
+        # any new subscriber immediately receives the LAST published cloud
+        # from the PREVIOUS segmentation. We must filter that out:
+        #   1. Phase 1 (200ms window): collect any latched message and remember
+        #      its header stamp as `stale_stamp`.
+        #   2. Phase 2: wait for a message whose stamp DIFFERS from
+        #      `stale_stamp` (= the freshly produced pointcloud from this
+        #      segmentation run).
+        # If there's no latched message (first ever call), `stale_stamp` is
+        # None and Phase 2 accepts the first message it sees.
+        # Without this fix, post-creep segmentations returned the pre-creep
+        # pointcloud, making get_topdown_grasp_pose return a stale centroid
+        # — root cause of the cube-pick failure on 2026-05-04.
         pc_result = {"data": None, "error": None}
+        ready_event = threading.Event()
 
         def _capture_pointcloud():
             try:
                 import websocket as _ws
-                import base64
-                import struct
 
                 pc_ws = _ws.create_connection(ws_manager.url, timeout=timeout)
                 sub_id = f"pc_capture:{uuid.uuid4().hex[:8]}"
@@ -108,17 +121,45 @@ def register_segmentation_tools(
                     "type": "sensor_msgs/msg/PointCloud2",
                 }))
 
-                # Wait for the message
+                # Phase 1 — drain any latched (stale) messages for ~250ms.
+                stale_stamp = None
+                pc_ws.settimeout(0.25)
+                try:
+                    while True:
+                        raw = pc_ws.recv()
+                        data = json.loads(raw)
+                        if data.get("topic") != pointcloud_topic:
+                            continue
+                        msg = data.get("msg", {})
+                        stamp = msg.get("header", {}).get("stamp", {})
+                        stale_stamp = (
+                            stamp.get("sec", 0),
+                            stamp.get("nanosec", 0),
+                        )
+                except (_ws.WebSocketTimeoutException, OSError, TimeoutError):
+                    pass  # no more latched messages
+
+                # Signal main thread it can publish the prompt now.
+                ready_event.set()
+
+                # Phase 2 — wait for the fresh pointcloud (stamp != stale).
                 pc_ws.settimeout(timeout)
                 while True:
                     raw = pc_ws.recv()
                     data = json.loads(raw)
-                    if data.get("topic") == pointcloud_topic:
-                        # Parse the pointcloud inline
-                        msg = data.get("msg", {})
-                        points, colors, frame_id = ws_manager._parse_pointcloud(msg)
-                        pc_result["data"] = (points, colors, frame_id)
-                        break
+                    if data.get("topic") != pointcloud_topic:
+                        continue
+                    msg = data.get("msg", {})
+                    stamp = msg.get("header", {}).get("stamp", {})
+                    msg_stamp = (
+                        stamp.get("sec", 0),
+                        stamp.get("nanosec", 0),
+                    )
+                    if stale_stamp is not None and msg_stamp == stale_stamp:
+                        continue  # still the latched stale one; keep waiting
+                    points, colors, frame_id = ws_manager._parse_pointcloud(msg)
+                    pc_result["data"] = (points, colors, frame_id)
+                    break
 
                 pc_ws.send(json.dumps({
                     "op": "unsubscribe",
@@ -128,12 +169,16 @@ def register_segmentation_tools(
                 pc_ws.close()
             except Exception as e:
                 pc_result["error"] = str(e)
+                ready_event.set()  # don't block main thread on error
 
         pc_thread = threading.Thread(target=_capture_pointcloud, daemon=True)
         pc_thread.start()
 
-        # Give the subscriber a moment to register with rosbridge
-        time.sleep(0.5)
+        # Wait for capture thread to finish draining latched messages before
+        # publishing the prompt. Without this, the prompt could trigger SAM3
+        # to publish a new pointcloud BEFORE the capture thread has subscribed
+        # and recorded the stale baseline.
+        ready_event.wait(timeout=2.0)
 
         # Publish the text prompt to the selected camera's /segment_text
         try:
