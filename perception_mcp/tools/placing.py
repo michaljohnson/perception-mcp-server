@@ -102,6 +102,7 @@ def register_placing_tools(
         object_name: str,
         top_clearance_m: float = 0.20,
         object_height_m: float = 0.0,
+        x_bias_m: float = 0.0,
         pointcloud_topic: str = "/segmented_pointcloud",
         use_cached: bool = True,
         crop_center_x: float = None,
@@ -122,6 +123,14 @@ def register_placing_tools(
                 `_GRIPPER_FINGER_LENGTH + object_height_m` to wrist_z so
                 the released object lands at `surface + top_clearance_m`.
                 Default 0.0 = container mode (legacy behavior).
+            x_bias_m: Forward offset (meters) added to the centroid x
+                AFTER mean computation. Use ~0.15 for SURFACE mode with
+                the front camera: SAM3 from a horizontal view sees only
+                the near strip of a large table top, biasing the
+                centroid toward the front edge. A +0.15m bias pushes
+                the place pose deeper into the table for safer central
+                placement. Default 0.0 = no bias (container mode and
+                stage-2 arm-cam refine both have less centroid bias).
             pointcloud_topic: Topic to read if use_cached=False or cache
                 empty. Default `/segmented_pointcloud` (SAM3 output).
                 Use `/arm_camera/points` for raw arm depth or
@@ -225,8 +234,9 @@ def register_placing_tools(
                     "num_points_post_crop": len(points_base),
                 }
 
-        cx = round(float(points_base[:, 0].mean()), 4)
+        cx_raw = round(float(points_base[:, 0].mean()), 4)
         cy = round(float(points_base[:, 1].mean()), 4)
+        cx = round(cx_raw + x_bias_m, 4)
         top_z = round(float(np.percentile(points_base[:, 2], 95)), 4)
 
         if object_height_m > 0:
@@ -267,9 +277,11 @@ def register_placing_tools(
             "object_name": object_name,
             "surface_height_m": top_z,
             "surface_centroid": {"x": cx, "y": cy, "z": top_z},
+            "centroid_raw": {"x": cx_raw, "y": cy},
             "place_pose": place_pose,
             "top_clearance_m": top_clearance_m,
             "object_height_m": object_height_m,
+            "x_bias_m": x_bias_m,
             "gripper_finger_length_m": _GRIPPER_FINGER_LENGTH,
             "mode": mode,
             "method": "mean_xy_p95_z",
