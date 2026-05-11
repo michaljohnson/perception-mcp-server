@@ -2,10 +2,14 @@
 and placing tools.
 
 In ROS 2 Jazzy, `LookupTransform` is an action (not a service), so we
-talk to the `/tf2_buffer_server` action directly via the WebSocket
-manager. The pose-computation tools (`get_topdown_grasp_pose`,
-`get_topdown_placing_pose`) call `_tf_lookup` to bring camera-frame point
-clouds into the robot's `base_footprint` frame.
+talk to a tf2 buffer_server action via the WebSocket manager. We use a
+namespaced canonical instance at `/canonical_tf/tf2_buffer_server` so
+the lookup doesn't race against the five default-named buffer servers
+spawned by other rclpy components (MoveIt, rviz, segmentation nodes,
+etc.). See `_tf_lookup` for the rationale. The pose-computation tools
+(`get_topdown_grasp_pose`, `get_topdown_placing_pose`) call `_tf_lookup`
+to bring camera-frame point clouds into the robot's `base_footprint`
+frame.
 
 `TOP_DOWN_ORIENTATION` is the quaternion for a strict top-down gripper
 approach: 180° rotation about X (the EEF frame has Z-up at rest, so we
@@ -44,14 +48,26 @@ def _tf_lookup(
     target_frame: str = "base_footprint",
     timeout: float = 5.0,
 ) -> tuple[dict, dict]:
-    """Look up a TF transform via the `/tf2_buffer_server` action.
+    """Look up a TF transform via the canonical buffer server action.
+
+    Calls `/canonical_tf/tf2_buffer_server` (namespaced) instead of the
+    default `/tf2_buffer_server` to avoid a race condition: MoveIt, rviz,
+    moveit_mcp_server, the segmentation nodes, and other rclpy components
+    each spawn their own `tf2_ros.Buffer.create_server()` advertising the
+    default action name with independent Buffer caches. ROS 2 discovery
+    routes a goal request to whichever one binds first, producing
+    intermittent wrong transforms (camera-frame depth leaking through
+    as base-frame z, etc.).
+
+    The canonical instance is launched by start_mcp_servers.sh under
+    namespace /canonical_tf with use_sim_time:=true.
 
     Returns:
         (translation, rotation) where translation is a dict {x, y, z}
         and rotation is a dict {x, y, z, w}. Raises on lookup failure.
     """
     result = ws_manager.send_action_goal(
-        action_name="/tf2_buffer_server",
+        action_name="/canonical_tf/tf2_buffer_server",
         action_type="tf2_msgs/action/LookupTransform",
         goal={
             "target_frame": target_frame,
