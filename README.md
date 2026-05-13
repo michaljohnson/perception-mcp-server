@@ -108,9 +108,12 @@ Computes a top-down grasp pose from the cached point cloud (or, as a fallback, f
 
 1. Read point cloud from the cache (default) or the provided topic.
 2. `centroid = points.mean(axis=0)`; bounding box is `(min, max, max-min)`.
-3. TF-transform the centroid from camera optical frame to base frame, using the cached snapshot when available, otherwise a live `_tf_lookup` via the `/tf2_buffer_server` action.
+3. TF-transform the centroid AND the full point cloud from camera optical frame to base frame, using the cached snapshot when available, otherwise a live `_tf_lookup` via the `/tf2_buffer_server` action.
 4. Apply a vertical gripper-finger offset to z (default 14 cm — Robotiq 2F-140; defined as `GRIPPER_FINGER_OFFSET_M` in `utils/transforms.py`, change there if your gripper differs).
-5. Set orientation to strict top-down `(x=1, y=0, z=0, w=0)`.
+5. Compute a 2D PCA on the base-frame `(x, y)` projection of the point cloud. The leading eigenvector gives the object's principal (long) axis; the aspect ratio is `sqrt(lambda_long / lambda_short)`.
+6. Choose the gripper yaw:
+   - If `aspect_ratio >= 1.2` → align the gripper fingers across the short axis (`yaw = long_axis_angle`, wrapped to `[-pi/2, pi/2]` since the Robotiq 2F is 180°-symmetric about its approach axis), compose with the strict top-down quaternion via Hamilton product, and return the result with `oriented: true`.
+   - Otherwise → return the strict top-down `(x=1, y=0, z=0, w=0)` unchanged with `oriented: false`.
 
 ### Returns (success)
 
@@ -120,17 +123,20 @@ Computes a top-down grasp pose from the cached point cloud (or, as a fallback, f
  "centroid_base_frame":   {"x":..,"y":..,"z":..},
  "grasp_pose": {"frame_id":"base_footprint",
                 "position":{"x":..,"y":..,"z":..},
-                "orientation":{"x":1,"y":0,"z":0,"w":0}},
+                "orientation":{"x":..,"y":..,"z":..,"w":..}},
  "bounding_box": {"min":{...}, "max":{...}, "size":{...}},
- "num_points": N, "camera_frame_id":"...", "gripper_offset_m":0.14}
+ "num_points": N, "camera_frame_id":"...", "gripper_offset_m":0.14,
+ "principal_axis_angle_rad": ..., "principal_axis_angle_deg": ...,
+ "principal_axis_aspect_ratio": ..., "oriented": true|false}
 ```
 
 If TF fails, the response includes `centroid_camera_frame` only and a `warning` field — callers should treat this as a failure (no `grasp_pose` to plan to).
 
 ### Limitations
 
-- **Top-down grasps only.** No yaw / approach direction reasoning. If the object lies flat on a surface and is grippable from above, this works well; if not, you need a richer pose computation than this primitive offers.
-- **Centroid-based.** Works for compact, roughly symmetric objects (cups, balls, small tools). For long or very irregular objects (a rake, a coiled cable) the centroid is not the right grasp point.
+- **Top-down grasps only.** The approach direction is fixed (-z in base frame); only the yaw is shape-aware. Side or angled grasps need a richer primitive.
+- **Centroid-based position.** Works for compact, roughly symmetric objects (cups, balls, small tools). For long or very irregular objects (a rake, a coiled cable) the centroid is not the right grasp point even with the PCA yaw.
+- **Empirical finger-axis convention (Robotiq 2F-140 on UR5e).** Validated 2026-05-12 on a red shoe: the fingers close along the gripper-tool **X axis** (mapping to base +X after the strict top-down flip). The grasp yaw applied to the gripper is therefore `angle_long + pi/2` so the finger axis aligns with the SHORT axis of the segmented point cloud. If a future gripper mount or model uses tool-Y fingers, remove the `+ math.pi / 2` term in `grasping.py`.
 
 ### Prerequisites
 

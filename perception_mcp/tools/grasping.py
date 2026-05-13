@@ -5,13 +5,20 @@ to the robot base frame via TF2, and returns ready-to-use grasp poses
 for MoveIt execution.
 """
 
+import math
+
 from fastmcp import FastMCP
 
 from perception_mcp.utils.transforms import (
     GRIPPER_FINGER_OFFSET_M,
     TOP_DOWN_ORIENTATION,
+    _PCA_ASPECT_RATIO_MIN,
+    _oriented_topdown_quaternion,
+    _principal_axis_angle_xy,
+    _shortest_grasp_yaw,
     _tf_lookup,
     _transform_point,
+    _transform_points,
 )
 from perception_mcp.utils.websocket import WebSocketManager
 
@@ -33,6 +40,15 @@ def register_grasping_tools(
             "via TF2, and returns a top-down grasp pose ready for MoveIt.\n\n"
             "The grasp pose accounts for the Robotiq 140 gripper finger length\n"
             "(14cm offset above the object centroid).\n\n"
+            "Orientation is shape-aware: a 2D PCA on the base-frame xy\n"
+            "projection of the point cloud gives the object's principal\n"
+            "axis, and the gripper yaw is set so the fingers close ACROSS\n"
+            "the short axis. For approximately round / square top-down\n"
+            "footprints (aspect ratio < 1.2) the default top-down\n"
+            "orientation [1, 0, 0, 0] is returned unchanged. The response\n"
+            "exposes principal_axis_angle_rad, principal_axis_angle_deg,\n"
+            "principal_axis_aspect_ratio, and a boolean oriented flag so\n"
+            "callers can inspect the geometry.\n\n"
             "PREREQUISITE: Call segment_objects() first to generate the point cloud.\n\n"
             "The returned grasp_pose can be passed directly to MoveIt's\n"
             "plan_to_pose or plan_and_execute tool.\n\n"
@@ -118,6 +134,30 @@ def register_grasping_tools(
                 )
             centroid_base = _transform_point(centroid_camera, translation, rotation)
 
+            # 2D PCA on the base-frame xy projection of the point cloud
+            # to align the gripper fingers with the object's short axis.
+            # Round / square footprints (aspect ratio below the threshold)
+            # fall back to the default top-down orientation.
+            #
+            # Empirical Robotiq 2F-140 finger-axis convention (validated
+            # 2026-05-12 on a red shoe): the fingers close along the
+            # gripper-tool X axis, NOT tool Y as initially assumed.
+            # After the top-down flip (q_topdown = 180 deg about base-X)
+            # the finger axis maps to base +X. To rotate the fingers
+            # ACROSS the object's short axis, the gripper yaw therefore
+            # equals the SHORT-axis angle = angle_long + pi/2.
+            points_base = _transform_points(points, translation, rotation)
+            angle_long, aspect_ratio = _principal_axis_angle_xy(points_base)
+            if aspect_ratio >= _PCA_ASPECT_RATIO_MIN:
+                grasp_yaw = _shortest_grasp_yaw(angle_long + math.pi / 2)
+                orientation = _oriented_topdown_quaternion(grasp_yaw)
+                orientation = {k: round(v, 6) for k, v in orientation.items()}
+                oriented = True
+            else:
+                grasp_yaw = 0.0
+                orientation = TOP_DOWN_ORIENTATION
+                oriented = False
+
             grasp_pose = {
                 "frame_id": "base_footprint",
                 "position": {
@@ -125,7 +165,7 @@ def register_grasping_tools(
                     "y": centroid_base["y"],
                     "z": round(centroid_base["z"] + GRIPPER_FINGER_OFFSET_M, 4),
                 },
-                "orientation": TOP_DOWN_ORIENTATION,
+                "orientation": orientation,
             }
 
             return {
@@ -137,6 +177,10 @@ def register_grasping_tools(
                 "num_points": len(points),
                 "camera_frame_id": frame_id,
                 "gripper_offset_m": GRIPPER_FINGER_OFFSET_M,
+                "principal_axis_angle_rad": round(float(grasp_yaw), 4),
+                "principal_axis_angle_deg": round(float(grasp_yaw) * 180.0 / 3.14159265358979, 2),
+                "principal_axis_aspect_ratio": round(float(aspect_ratio), 3),
+                "oriented": oriented,
             }
 
         except (TimeoutError, RuntimeError, Exception) as e:
