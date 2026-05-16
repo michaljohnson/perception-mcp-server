@@ -123,10 +123,18 @@ def _transform_points(points: np.ndarray, translation: dict, rotation: dict) -> 
 # Aspect ratio (long / short principal axis) below which the object is
 # considered approximately rotationally symmetric in top-down view; for
 # such shapes the grasp yaw is undefined and we fall back to the default
-# top-down orientation. 1.2 chosen empirically: a cube projects to a
-# square (ratio ~1.0); a 14cm coke can on its base also ~1.0; a shoe
-# is typically 2.5-3.0. The threshold sits comfortably between.
-_PCA_ASPECT_RATIO_MIN = 1.2
+# top-down orientation. Empirical bands:
+#   - cube / ball (true ratio ~1.0): real segmentation noise pushes
+#     observed ratio to ~1.05-1.30 — bogus PCA yaw if accepted
+#   - coke can on its base (true ratio ~1.0): same as cube
+#   - shoe: ~2.0-3.0 — genuine long axis
+#   - coke can on its side: ~2.5 — genuine long axis
+# 2026-05-16: raised 1.2 → 1.5 after a skill_based pick on a white cube
+# failed with PLANNING_FAILED. Segmentation reported aspect=1.21 → PCA
+# fired → 68 deg arbitrary yaw → IK landed in a wrist-twisted branch
+# unreachable from look_forward. 1.5 sits in the gap between cube noise
+# and real elongation. See [[project_session_2026_05_16]] for the run.
+_PCA_ASPECT_RATIO_MIN = 1.5
 
 
 def _principal_axis_angle_xy(points_base: np.ndarray) -> tuple[float, float]:
